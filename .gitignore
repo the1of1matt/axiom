@@ -1,7 +1,12 @@
 /target
 **/*.rs.bk
 .DS_Store
-*.exe
+*.swp
+*.swo
+.env
+.idea/
+.vscode/
 *.pdb
 dist/axiom
 dist/axiom-*
+*.exe
