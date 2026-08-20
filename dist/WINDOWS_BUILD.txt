@@ -1,0 +1,11 @@
+axiom.exe is produced on a Windows runner (or a Windows machine), not in this Linux sandbox.
+
+Build on Windows:
+  cargo build --release
+  # output: target\release\axiom.exe
+
+Or via GitHub Actions (Release workflow on windows-latest):
+  artifact: axiom-windows-x64.zip containing axiom.exe + README.txt
+
+Required target:
+  x86_64-pc-windows-msvc

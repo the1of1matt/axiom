@@ -1,0 +1,34 @@
+[package]
+name = "axiom"
+version = "0.1.0"
+edition = "2021"
+description = "Axiom - eliminate developer toolchain/setup hell"
+license = "MIT"
+repository = "https://github.com/axiom-dev/axiom"
+readme = "README.md"
+keywords = ["cli", "developer-tools", "toolchain"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "=4.4.18", features = ["derive"] }
+walkdir = "=2.4.0"
+serde = { version = "=1.0.197", features = ["derive"] }
+serde_json = "=1.0.114"
+dirs = "=5.0.1"
+thiserror = "=1.0.57"
+anyhow = "=1.0.80"
+zip = { version = "=0.6.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "=3.10.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[[bin]]
+name = "axiom"
+path = "src/main.rs"
