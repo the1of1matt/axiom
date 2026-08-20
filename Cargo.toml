@@ -2,14 +2,8 @@
 name = "axiom"
 version = "0.1.0"
 edition = "2021"
-description = "Axiom — local developer utility that discovers, prepares, and runs projects without toolchain hell"
+description = "Axiom — local developer utility that discovers, prepares, and runs projects"
 license = "MIT"
-repository = "https://github.com/the1of1matt/axiom"
-readme = "README.md"
-
-[[bin]]
-name = "axiom"
-path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
@@ -24,5 +18,4 @@ thiserror = "1"
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
