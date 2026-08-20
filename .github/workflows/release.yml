@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: axiom-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: axiom-macos-aarch64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: axiom-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: axiom-windows-x64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN="target/${{ matrix.target }}/release/axiom"
+          strip "$BIN" || true
+          mkdir -p dist
+          cp "$BIN" "dist/axiom"
+          echo "Axiom — run projects without toolchain hell" > dist/README.txt
+          echo "Usage: ./axiom run project.zip" >> dist/README.txt
+          (cd dist && tar -czf "../${{ matrix.asset }}.tar.gz" .)
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/axiom.exe" dist/axiom.exe
+          Set-Content -Path dist/README.txt -Encoding utf8 -Value @"
+          Axiom — run projects without toolchain hell
+
+          Usage:
+            .\axiom.exe run path\to\project
+            .\axiom.exe run project.zip
+            .\axiom.exe doctor
+
+          Extract this ZIP and run axiom.exe, or add the folder to PATH.
+          "@
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.asset }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
