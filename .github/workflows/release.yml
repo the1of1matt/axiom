@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.1.0). Leave empty on tag push."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -15,22 +20,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Required by website download URLs:
+          #   axiom-linux-x86_64.tar.gz
+          #   axiom-macos-aarch64.tar.gz
+          #   axiom-windows-x64.zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: axiom-linux-x86_64
+            archive: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: axiom-macos-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset: axiom-macos-x86_64
+            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: axiom-windows-x64
+            archive: zip
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -41,23 +52,33 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
-        if: runner.os != 'Windows'
+        if: matrix.archive == 'tar.gz'
         run: |
+          set -euo pipefail
           BIN="target/${{ matrix.target }}/release/axiom"
+          test -f "$BIN"
           strip "$BIN" || true
           mkdir -p dist
-          cp "$BIN" "dist/axiom"
-          echo "Axiom — run projects without toolchain hell" > dist/README.txt
-          echo "Usage: ./axiom run project.zip" >> dist/README.txt
-          (cd dist && tar -czf "../${{ matrix.asset }}.tar.gz" .)
+          cp "$BIN" dist/axiom
+          {
+            echo "Axiom — run projects without toolchain hell"
+            echo ""
+            echo "Usage:"
+            echo "  ./axiom run project.zip"
+            echo "  ./axiom run ./my-project"
+            echo "  ./axiom doctor"
+          } > dist/README.txt
+          tar -czf "${{ matrix.asset }}.tar.gz" -C dist .
+          ls -la "${{ matrix.asset }}.tar.gz"
 
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.archive == 'zip'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/axiom.exe" dist/axiom.exe
-          Set-Content -Path dist/README.txt -Encoding utf8 -Value @"
+          @"
           Axiom — run projects without toolchain hell
 
           Usage:
@@ -66,29 +87,59 @@ jobs:
             .\axiom.exe doctor
 
           Extract this ZIP and run axiom.exe, or add the folder to PATH.
-          "@
+          "@ | Set-Content -Path dist/README.txt -Encoding utf8
           Compress-Archive -Path dist\* -DestinationPath "${{ matrix.asset }}.zip" -Force
+          Get-Item "${{ matrix.asset }}.zip"
 
+      # Upload only the file this matrix cell produces (avoid missing-path failures)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: |
-            ${{ matrix.asset }}.tar.gz
-            ${{ matrix.asset }}.zip
+          path: ${{ matrix.asset }}.${{ matrix.archive }}
+          if-no-files-found: error
 
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Tag push OR manual dispatch with a tag input
+    if: >
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Create GitHub Release
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f | sort
+
+      - name: Flatten archives for release upload
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          # Expected layout: artifacts/<asset-name>/<asset-name>.{tar.gz,zip}
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 |
+            while IFS= read -r -d '' f; do
+              cp -v "$f" "release-assets/$(basename "$f")"
+            done
+          ls -la release-assets/
+          # Hard-require the three website URLs
+          test -f release-assets/axiom-linux-x86_64.tar.gz
+          test -f release-assets/axiom-macos-aarch64.tar.gz
+          test -f release-assets/axiom-windows-x64.zip
+
+      - name: Create / update GitHub Release with assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          tag_name: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/axiom-linux-x86_64.tar.gz
+            release-assets/axiom-macos-aarch64.tar.gz
+            release-assets/axiom-windows-x64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
