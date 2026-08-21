@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to publish (e.g. v0.1.0). Leave empty on tag push."
-        required: false
+        description: "Tag to publish (e.g. v0.1.1). Creates the tag on main if missing."
+        required: true
         default: ""
 
 permissions:
@@ -20,10 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Required by website download URLs:
-          #   axiom-linux-x86_64.tar.gz
-          #   axiom-macos-aarch64.tar.gz
-          #   axiom-windows-x64.zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: axiom-linux-x86_64
@@ -41,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -91,7 +87,6 @@ jobs:
           Compress-Archive -Path dist\* -DestinationPath "${{ matrix.asset }}.zip" -Force
           Get-Item "${{ matrix.asset }}.zip"
 
-      # Upload only the file this matrix cell produces (avoid missing-path failures)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,7 +97,6 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    # Tag push OR manual dispatch with a tag input
     if: >
       startsWith(github.ref, 'refs/tags/') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
@@ -118,13 +112,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          # Expected layout: artifacts/<asset-name>/<asset-name>.{tar.gz,zip}
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 |
             while IFS= read -r -d '' f; do
               cp -v "$f" "release-assets/$(basename "$f")"
             done
           ls -la release-assets/
-          # Hard-require the three website URLs
           test -f release-assets/axiom-linux-x86_64.tar.gz
           test -f release-assets/axiom-macos-aarch64.tar.gz
           test -f release-assets/axiom-windows-x64.zip
@@ -134,9 +126,11 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
+          generate_release_notes: true
           files: |
             release-assets/axiom-linux-x86_64.tar.gz
             release-assets/axiom-macos-aarch64.tar.gz
