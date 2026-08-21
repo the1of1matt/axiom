@@ -1,10 +1,10 @@
 [package]
 name = "axiom"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Axiom - eliminate developer toolchain/setup hell"
 license = "MIT"
-repository = "https://github.com/axiom-dev/axiom"
+repository = "https://github.com/the1of1matt/axiom"
 readme = "README.md"
 keywords = ["cli", "developer-tools", "toolchain"]
 categories = ["command-line-utilities", "development-tools"]
