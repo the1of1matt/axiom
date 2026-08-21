@@ -1,20 +1,17 @@
 #!/bin/sh
 # Axiom installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install.sh | sh
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/the1of1matt/axiom/main/scripts/install.sh | sh
 #
-# Installs a prebuilt Axiom binary. Does NOT require Rust, Cargo, Node, or any toolchain.
+# Installs a prebuilt Axiom binary. Does NOT require Rust, Cargo, Node, npm,
+# Python, Go, Homebrew, or any other development toolchain.
 # Supports macOS (Apple Silicon + Intel) and Linux (x86_64 + aarch64).
 
 set -e
 
-# ---------------------------------------------------------------------------
-# Configuration — change these when the public repo / releases exist
-# ---------------------------------------------------------------------------
-REPO="${AXIOM_REPO:-axiom-dev/axiom}"
-# Official install can override with: AXIOM_VERSION=v0.1.0
+REPO="${AXIOM_REPO:-the1of1matt/axiom}"
 VERSION="${AXIOM_VERSION:-latest}"
 INSTALL_DIR="${AXIOM_INSTALL_DIR:-}"
-# ---------------------------------------------------------------------------
 
 RED=''
 GREEN=''
@@ -34,9 +31,6 @@ ok()    { printf "${GREEN}✓${RESET} %s\n" "$*"; }
 warn()  { printf "${YELLOW}!${RESET} %s\n" "$*"; }
 err()   { printf "${RED}error:${RESET} %s\n" "$*" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# Detect OS + architecture
-# ---------------------------------------------------------------------------
 detect_platform() {
   OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"
@@ -44,7 +38,7 @@ detect_platform() {
   case "$OS" in
     darwin)  OS_NAME="macos" ;;
     linux)   OS_NAME="linux" ;;
-    *)       err "Unsupported OS: $OS. Axiom currently supports macOS and Linux." ;;
+    *)       err "Unsupported OS: $OS. Axiom currently supports macOS and Linux.\nWindows users: download axiom-windows-x64.zip from GitHub Releases." ;;
   esac
 
   case "$ARCH" in
@@ -53,64 +47,60 @@ detect_platform() {
     *)              err "Unsupported architecture: $ARCH" ;;
   esac
 
-  # Asset naming convention used by GitHub Releases
-  # Examples: axiom-macos-aarch64, axiom-linux-x86_64
-  ASSET_NAME="axiom-${OS_NAME}-${ARCH_NAME}"
+  # Must match GitHub Release asset names produced by release.yml
+  ASSET_BASE="axiom-${OS_NAME}-${ARCH_NAME}"
+  ASSET_ARCHIVE="${ASSET_BASE}.tar.gz"
   BINARY_NAME="axiom"
 }
 
-# ---------------------------------------------------------------------------
-# Resolve install directory (user-owned, no sudo)
-# ---------------------------------------------------------------------------
 resolve_install_dir() {
   if [ -n "$INSTALL_DIR" ]; then
     return
   fi
-
-  # Prefer ~/.axiom/bin (keeps everything under Axiom's home)
-  if [ -n "$HOME" ]; then
-    INSTALL_DIR="$HOME/.axiom/bin"
-  else
+  if [ -z "$HOME" ]; then
     err "HOME is not set; cannot determine install location"
   fi
+
+  # Prefer ~/.local/bin when it is already on PATH (common on Linux; some Mac setups).
+  # Always keep a canonical copy under ~/.axiom/bin as well.
+  AXIOM_BIN_DIR="$HOME/.axiom/bin"
+  LOCAL_BIN_DIR="$HOME/.local/bin"
+
+  case ":$PATH:" in
+    *":${LOCAL_BIN_DIR}:"*)
+      INSTALL_DIR="$LOCAL_BIN_DIR"
+      ;;
+    *)
+      INSTALL_DIR="$AXIOM_BIN_DIR"
+      ;;
+  esac
 }
 
-# ---------------------------------------------------------------------------
-# Download helper (curl preferred, wget fallback)
-# ---------------------------------------------------------------------------
 download() {
   url="$1"
   dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    # --connect-timeout and --max-time prevent hangs on missing hosts/releases
-    curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 1 \
+    curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 1 \
       -o "$dest" "$url"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q --timeout=30 -O "$dest" "$url"
+    wget -q --timeout=60 -O "$dest" "$url"
   else
     err "Need curl or wget to download Axiom"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Resolve the download URL from GitHub Releases
-# ---------------------------------------------------------------------------
 resolve_download_url() {
   if [ -n "${AXIOM_BINARY_URL:-}" ]; then
-    # Explicit override (useful for testing / private mirrors)
     DOWNLOAD_URL="$AXIOM_BINARY_URL"
     return
   fi
 
   if [ "$VERSION" = "latest" ]; then
-    # Use the /releases/latest redirect — GitHub serves the asset list
-    # We construct the conventional asset URL. If the release does not
-    # exist yet this will 404 and we give a clear message.
     API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-    # Try to discover the real asset name via API if possible
     if command -v curl >/dev/null 2>&1; then
-      ASSET_URL=$(curl -fsSL --connect-timeout 5 --max-time 15 "$API_URL" 2>/dev/null \
-        | grep -o "\"browser_download_url\": \"[^\"]*${ASSET_NAME}[^\"]*\"" \
+      # Prefer browser_download_url that matches our archive name exactly
+      ASSET_URL=$(curl -fsSL --connect-timeout 10 --max-time 20 "$API_URL" 2>/dev/null \
+        | grep -o "\"browser_download_url\": \"[^\"]*${ASSET_ARCHIVE}\"" \
         | head -1 \
         | sed 's/.*"browser_download_url": "\([^"]*\)".*/\1/') || true
       if [ -n "$ASSET_URL" ]; then
@@ -118,16 +108,135 @@ resolve_download_url() {
         return
       fi
     fi
-    # Fallback to conventional path (works once a release with that asset exists)
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_ARCHIVE}"
   else
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_ARCHIVE}"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Main install
-# ---------------------------------------------------------------------------
+# Append PATH export to a profile file once (idempotent via marker).
+append_path_line() {
+  profile="$1"
+  marker="# Axiom CLI"
+  path_line="export PATH=\"${AXIOM_BIN_DIR}:\$PATH\""
+
+  # Ensure parent exists; create empty profile if needed
+  if [ ! -f "$profile" ]; then
+    # Only create well-known profiles, not arbitrary paths
+    touch "$profile" 2>/dev/null || return 1
+  fi
+
+  if grep -q "$marker" "$profile" 2>/dev/null; then
+    return 0
+  fi
+
+  {
+    echo ""
+    echo "$marker"
+    echo "$path_line"
+  } >> "$profile"
+  return 0
+}
+
+setup_path() {
+  AXIOM_BIN_DIR="$HOME/.axiom/bin"
+
+  NEED_PATH=1
+  case ":$PATH:" in
+    *":${AXIOM_BIN_DIR}:"*) NEED_PATH=0 ;;
+  esac
+  # Also OK if the binary is already findable (e.g. installed to ~/.local/bin on PATH)
+  if command -v axiom >/dev/null 2>&1; then
+    NEED_PATH=0
+  fi
+
+  if [ "$NEED_PATH" -eq 0 ]; then
+    ok "axiom is on your PATH"
+    return
+  fi
+
+  info "Configuring PATH so 'axiom' works in new terminals"
+
+  # macOS Terminal/iTerm often start login shells → .zprofile;
+  # interactive zsh also reads .zshrc. Write both.
+  # Linux bash: .bashrc / .profile. Cover the common set so a new terminal works.
+  UPDATED=""
+  for profile in \
+    "$HOME/.zprofile" \
+    "$HOME/.zshrc" \
+    "$HOME/.bash_profile" \
+    "$HOME/.bashrc" \
+    "$HOME/.profile"
+  do
+    # On macOS default shell is zsh — always ensure zsh profiles exist.
+    # For bash-only files, only write if the file already exists (except .profile).
+    case "$profile" in
+      */.zprofile|*/.zshrc)
+        if append_path_line "$profile"; then
+          UPDATED="${UPDATED} $(basename "$profile")"
+        fi
+        ;;
+      */.profile)
+        if append_path_line "$profile"; then
+          UPDATED="${UPDATED} $(basename "$profile")"
+        fi
+        ;;
+      *)
+        if [ -f "$profile" ]; then
+          if append_path_line "$profile"; then
+            UPDATED="${UPDATED} $(basename "$profile")"
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  if [ -n "$UPDATED" ]; then
+    ok "PATH updated in:${UPDATED}"
+  else
+    warn "Could not update shell profiles automatically."
+    echo "  Add this line to your shell config:"
+    echo "    export PATH=\"${AXIOM_BIN_DIR}:\$PATH\""
+  fi
+
+  # Make the current shell session work when the installer is sourced,
+  # and print a one-liner for curl|sh users in the same terminal.
+  export PATH="${AXIOM_BIN_DIR}:$PATH"
+}
+
+extract_binary() {
+  archive="$1"
+  out_dir="$2"
+
+  mkdir -p "$out_dir"
+
+  # Archive from release.yml contains ./axiom (and README.txt)
+  if command -v tar >/dev/null 2>&1; then
+    # Extract only the binary member if present; fall back to full extract
+    if tar -tzf "$archive" 2>/dev/null | grep -qE '(^|/)axiom$'; then
+      tar -xzf "$archive" -C "$out_dir"
+    else
+      tar -xzf "$archive" -C "$out_dir"
+    fi
+  else
+    err "tar is required to extract the Axiom release archive"
+  fi
+
+  # Locate extracted binary (may be nested if archive layout differs)
+  if [ -f "$out_dir/axiom" ]; then
+    EXTRACTED="$out_dir/axiom"
+  else
+    EXTRACTED=$(find "$out_dir" -type f -name axiom 2>/dev/null | head -1)
+  fi
+
+  if [ -z "$EXTRACTED" ] || [ ! -f "$EXTRACTED" ]; then
+    err "Archive did not contain an 'axiom' binary"
+  fi
+
+  chmod 755 "$EXTRACTED"
+  echo "$EXTRACTED"
+}
+
 main() {
   printf "\n${BOLD}AXIOM installer${RESET}\n\n"
 
@@ -135,138 +244,96 @@ main() {
   resolve_install_dir
   resolve_download_url
 
-  info "Platform:  ${OS_NAME} / ${ARCH_NAME}"
-  info "Install to: ${INSTALL_DIR}"
-  info "Binary:     ${ASSET_NAME}"
+  AXIOM_BIN_DIR="$HOME/.axiom/bin"
+  mkdir -p "$AXIOM_BIN_DIR" "$INSTALL_DIR" || err "Cannot create install directories"
+
+  info "Platform:   ${OS_NAME} / ${ARCH_NAME}"
+  info "Repository: ${REPO}"
+  info "Version:    ${VERSION}"
+  info "Asset:      ${ASSET_ARCHIVE}"
+  info "Install to: ${AXIOM_BIN_DIR}/axiom"
   echo
 
-  # Create install directory
-  mkdir -p "$INSTALL_DIR" || err "Cannot create $INSTALL_DIR"
+  TMP_ROOT="${TMPDIR:-/tmp}/axiom-install-$$"
+  mkdir -p "$TMP_ROOT"
+  trap 'rm -rf "$TMP_ROOT"' EXIT
 
-  TMPDIR_INSTALL="${TMPDIR:-/tmp}"
-  TMP_BIN="${TMPDIR_INSTALL}/axiom-install-$$"
-  trap 'rm -f "$TMP_BIN"' EXIT
+  ARCHIVE_PATH="${TMP_ROOT}/${ASSET_ARCHIVE}"
 
-  info "Downloading..."
-  if ! download "$DOWNLOAD_URL" "$TMP_BIN" 2>/dev/null; then
+  info "Downloading ${DOWNLOAD_URL}"
+  if ! download "$DOWNLOAD_URL" "$ARCHIVE_PATH"; then
     echo
-    err "Could not download Axiom binary.
+    err "Could not download Axiom.
 
   URL tried: ${DOWNLOAD_URL}
 
-  This usually means:
-  1. The GitHub repository or release does not exist yet, or
-  2. The asset name does not match (expected: ${ASSET_NAME}).
+  Check that a GitHub Release exists on ${REPO} with asset:
+    ${ASSET_ARCHIVE}
 
-  What to do:
-  • If you are the project maintainer, create a GitHub Release and
-    upload assets named exactly:
-      axiom-macos-aarch64
-      axiom-macos-x86_64
-      axiom-linux-x86_64
-      axiom-linux-aarch64
-  • Or set AXIOM_BINARY_URL to a direct URL of a prebuilt binary
-    and re-run this script.
-  • Developers building from source should use: cargo build --release
+  Or set AXIOM_BINARY_URL to a direct archive/binary URL and re-run.
 "
   fi
 
-  # Make executable
-  chmod +x "$TMP_BIN"
-
-  # Basic sanity check — must look like an executable
-  if [ ! -s "$TMP_BIN" ]; then
+  if [ ! -s "$ARCHIVE_PATH" ]; then
     err "Downloaded file is empty"
   fi
 
-  # Move into place (atomic-ish)
-  TARGET="${INSTALL_DIR}/${BINARY_NAME}"
-  mv -f "$TMP_BIN" "$TARGET"
+  info "Extracting..."
+  EXTRACT_DIR="${TMP_ROOT}/extract"
+  EXTRACTED=$(extract_binary "$ARCHIVE_PATH" "$EXTRACT_DIR")
+
+  # Install canonical binary under ~/.axiom/bin
+  TARGET="${AXIOM_BIN_DIR}/axiom"
+  cp -f "$EXTRACTED" "$TARGET"
   chmod 755 "$TARGET"
   ok "Installed ${TARGET}"
 
-  # Verify it runs
-  info "Verifying..."
-  if ! "$TARGET" --version >/dev/null 2>&1; then
-    # Some builds may only support -V; try both
-    if ! "$TARGET" -V >/dev/null 2>&1; then
-      warn "Binary installed but --version failed. It may still work."
-    else
-      VER=$("$TARGET" -V 2>/dev/null || true)
-      ok "Verified: ${VER}"
-    fi
-  else
+  # If we chose ~/.local/bin (already on PATH), place a copy/symlink there too
+  if [ "$INSTALL_DIR" != "$AXIOM_BIN_DIR" ]; then
+    mkdir -p "$INSTALL_DIR"
+    cp -f "$TARGET" "${INSTALL_DIR}/axiom"
+    chmod 755 "${INSTALL_DIR}/axiom"
+    ok "Also installed ${INSTALL_DIR}/axiom"
+  fi
+
+  info "Verifying binary..."
+  if "$TARGET" --version >/dev/null 2>&1; then
     VER=$("$TARGET" --version 2>/dev/null || true)
     ok "Verified: ${VER}"
-  fi
-
-  # PATH setup
-  echo
-  NEED_PATH=1
-  case ":$PATH:" in
-    *":${INSTALL_DIR}:"*) NEED_PATH=0 ;;
-  esac
-
-  if [ "$NEED_PATH" -eq 0 ]; then
-    ok "${INSTALL_DIR} is already on your PATH"
+  elif "$TARGET" -V >/dev/null 2>&1; then
+    VER=$("$TARGET" -V 2>/dev/null || true)
+    ok "Verified: ${VER}"
   else
-    info "Adding ${INSTALL_DIR} to PATH"
-
-    # Detect shell profile
-    PROFILE=""
-    if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
-      PROFILE="$HOME/.zshrc"
-    elif [ -n "${BASH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "bash" ]; then
-      if [ "$(uname -s)" = "Darwin" ]; then
-        PROFILE="$HOME/.bash_profile"
-      else
-        PROFILE="$HOME/.bashrc"
-      fi
-    else
-      # Fallback
-      if [ -f "$HOME/.zshrc" ]; then
-        PROFILE="$HOME/.zshrc"
-      elif [ -f "$HOME/.bashrc" ]; then
-        PROFILE="$HOME/.bashrc"
-      elif [ -f "$HOME/.profile" ]; then
-        PROFILE="$HOME/.profile"
-      fi
-    fi
-
-    MARKER="# Axiom CLI"
-    PATH_LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
-
-    if [ -n "$PROFILE" ]; then
-      if [ -f "$PROFILE" ] && grep -q "$MARKER" "$PROFILE" 2>/dev/null; then
-        ok "PATH entry already present in ${PROFILE}"
-      else
-        {
-          echo ""
-          echo "$MARKER"
-          echo "$PATH_LINE"
-        } >> "$PROFILE"
-        ok "Added PATH entry to ${PROFILE}"
-        warn "Restart your terminal or run:  source ${PROFILE}"
-      fi
-    else
-      warn "Could not detect shell profile. Add this to your shell config:"
-      echo "  ${PATH_LINE}"
-    fi
+    warn "Binary installed but --version failed. It may still work."
   fi
 
-  # Create the rest of ~/.axiom structure
+  setup_path
+
   mkdir -p "$HOME/.axiom/toolchains" "$HOME/.axiom/packages" \
            "$HOME/.axiom/cache" "$HOME/.axiom/projects" "$HOME/.axiom/tmp" 2>/dev/null || true
 
   echo
-  printf "${GREEN}${BOLD}Axiom is installed.${RESET}\n\n"
+  # Final check with PATH including our bin dir
+  PATH="${AXIOM_BIN_DIR}:$PATH"
+  export PATH
+  if command -v axiom >/dev/null 2>&1; then
+    ok "command -v axiom → $(command -v axiom)"
+  else
+    warn "axiom is not yet visible in this shell's PATH"
+  fi
+
+  printf "\n${GREEN}${BOLD}Axiom is installed.${RESET}\n\n"
   echo "  Binary:  ${TARGET}"
   echo "  Data:    ${HOME}/.axiom"
   echo
-  echo "Try it:"
+  echo "Open a new terminal window, then run:"
   echo "  axiom --version"
   echo "  axiom doctor"
-  echo "  axiom new hello && cd hello && axiom run"
+  echo "  axiom run ~/path/to/project"
+  echo
+  echo "In THIS terminal, run:"
+  echo "  export PATH=\"${AXIOM_BIN_DIR}:\$PATH\""
+  echo "  axiom --version"
   echo
   echo "To uninstall later:"
   echo "  axiom uninstall --yes"
