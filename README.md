@@ -13,6 +13,7 @@
     <img src="https://img.shields.io/badge/releases-latest-green.svg" alt="Releases">
   </a>
 </p>
+```
 
 **Eliminate developer toolchain / setup hell.**
 
