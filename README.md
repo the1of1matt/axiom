@@ -1,6 +1,6 @@
 # Axiom
 
-<img width="1010" height="266" alt="Firefly_RemoveBackground" src="https://github.com/user-attachments/assets/51ff073e-4d8e-41a2-a4ea-19e44233375a" />
+<img width="974" height="256" alt="Firefly_RemoveBackground-removebg-preview" src="https://github.com/user-attachments/assets/4a654820-a8a0-4342-aba2-8abed2b558f3" />
 
 **Eliminate developer toolchain / setup hell.**
 
