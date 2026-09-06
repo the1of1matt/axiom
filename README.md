@@ -16,7 +16,7 @@ Or for an existing project anywhere on your machine:
 ```bash
 axiom find my-app
 axiom run my-app
-axiom run ~/Desktop/MGMIDIController
+axiom run ~/Desktop/folder
 axiom run ~/Downloads/project.zip
 ```
 
