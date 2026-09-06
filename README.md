@@ -14,6 +14,8 @@
   </a>
 </p>
 
+---
+
 **Eliminate developer toolchain / setup hell.**
 
 Axiom is a small, free, open-source **local native CLI**.  
