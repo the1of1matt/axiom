@@ -1,5 +1,7 @@
 # Axiom
 
+<img width="1365" height="768" alt="Firefly_RemoveBackground" src="https://github.com/user-attachments/assets/ff519c21-a275-413f-bf70-96d869ded361" />
+
 **Eliminate developer toolchain / setup hell.**
 
 Axiom is a small, free, open-source **local native CLI**.  
