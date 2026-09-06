@@ -1,5 +1,21 @@
 # Axiom
 
+<img width="974" height="256" alt="Firefly_RemoveBackground-removebg-preview" src="https://github.com/user-attachments/assets/4a654820-a8a0-4342-aba2-8abed2b558f3" />
+
+<p align="center">
+  <a href="https://github.com/the1of1matt/axiom/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  </a>
+  <a href="https://axiom.fwh.is/">
+    <img src="https://img.shields.io/badge/website-axiom.fwh.is-blue.svg" alt="Website">
+  </a>
+  <a href="https://github.com/the1of1matt/axiom/releases">
+    <img src="https://img.shields.io/badge/releases-latest-green.svg" alt="Releases">
+  </a>
+</p>
+
+---
+
 **Eliminate developer toolchain / setup hell.**
 
 Axiom is a small, free, open-source **local native CLI**.  
