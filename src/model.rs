@@ -33,7 +33,61 @@ pub enum ComponentRole {
     Desktop,
     Database,
     Cache,
+    /// Library/package — not a long-running process by default.
+    Library,
     Unknown,
+}
+
+/// How Axiom should treat process lifetime for this target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// HTTP/TCP server — must stay alive; readiness via connectivity.
+    PersistentServer,
+    /// CLI / one-shot binary — exit 0 is success.
+    OneShotCli,
+    /// Library/package — build/test/package only; do not treat as a server.
+    Library,
+    /// Explicit test suite.
+    TestSuite,
+    /// Build artifacts only.
+    BuildOnly,
+    /// Could not determine confidently.
+    Ambiguous,
+}
+
+/// High-level project classification from metadata + structure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectClass {
+    Application,
+    Library,
+    Package,
+    Cli,
+    Tooling,
+    Example,
+    Test,
+    Unknown,
+}
+
+/// Structured verification outcome for diagnostics.
+#[derive(Debug, Clone)]
+pub struct VerificationResult {
+    pub project_type: String,
+    pub environment_prepared: bool,
+    pub dependencies_installed: bool,
+    pub process_started: bool,
+    pub listening_port: Option<u16>,
+    pub health: String,
+    pub exit_code: Option<i32>,
+    pub result: VerifyOutcome,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Pass,
+    Fail,
+    Partial,
+    Skipped,
 }
 
 /// A project-owned runnable unit (discovered under the project tree).
@@ -51,6 +105,8 @@ pub struct Component {
     pub readiness: Readiness,
     pub script_path: Option<PathBuf>,
     pub evidence: Vec<String>,
+    pub execution_mode: ExecutionMode,
+    pub project_class: ProjectClass,
 }
 
 /// External capability the application needs (Ollama, Docker, system runtimes, …).
