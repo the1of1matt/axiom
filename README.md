@@ -132,7 +132,7 @@ Failures report project type, mode, command, path, and actionable hints (e.g. mi
 | ZIP archives of the above | Yes | same | same |
 | Go / Java / C++ | Detected only | — | limited / unsupported for full orchestration |
 
-Axiom does **not** claim to run every repository on GitHub.
+Axiom does **not** claim to run every project you make or a repository on GitHub.
 
 ---
 
