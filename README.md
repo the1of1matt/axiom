@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/website-axiom.fwh.is-blue.svg" alt="Website">
   </a>
   <a href="https://github.com/the1of1matt/axiom/releases">
-    <img src="https://img.shields.io/badge/releases-latest-green.svg" alt="Releases">
+    <img src="https://img.shields.io/badge/release-v0.1.2--aegis-green.svg" alt="Release: v0.1.2-aegis">
   </a>
 </p>
 
@@ -36,11 +36,13 @@ axiom run ~/Desktop/folder
 axiom run ~/Downloads/project.zip
 ```
 
+**Current release:** [Axiom v0.1.2-aegis](https://github.com/the1of1matt/axiom/releases/tag/v0.1.2-aegis) — a hardening release driven by real-world project benchmarks.
+
 ---
 
 ## Install (end users)
 
-**You do not need Rust, Cargo, Node, npm, Python, Go, Homebrew, or any other development toolchain.**
+**You do not need Rust, Cargo, Node, npm, Python, Go, Homebrew, or any other development toolchain to install Axiom.**
 
 ### macOS / Linux — one-line install
 
@@ -64,18 +66,16 @@ The installer will:
 5. Verify the binary runs
 6. Print exactly what it did
 
-After a new terminal is opened, `axiom` should work without any manual PATH edits.
-
 ### Windows
 
 1. Download `axiom-windows-x64.zip` from [Releases](https://github.com/the1of1matt/axiom/releases/latest).
-2. Extract somewhere permanent (e.g. `%LOCALAPPDATA%\Axiom`).
+2. Extract somewhere permanent (e.g. `%LOCALAPPDATA%\\Axiom`).
 3. Add that folder to your user PATH, or run `axiom.exe` by full path.
 
 ```powershell
-.\axiom.exe --version
-.\axiom.exe doctor
-.\axiom.exe run .\project.zip
+.\\axiom.exe --version
+.\\axiom.exe doctor
+.\\axiom.exe run .\\project.zip
 ```
 
 ### Uninstall
@@ -84,55 +84,82 @@ After a new terminal is opened, `axiom` should work without any manual PATH edit
 axiom uninstall --yes
 ```
 
-This removes **only** Axiom’s own binary and `~/.axiom` data.  
-It never touches your projects or unrelated software.
-
-You may optionally remove the `# Axiom CLI` PATH lines from your shell profile.
-
-### Manual install
-
-1. Open [Releases](https://github.com/the1of1matt/axiom/releases/latest)
-2. Download the asset for your machine:
-   - `axiom-macos-aarch64.tar.gz` (Apple Silicon)
-   - `axiom-linux-x86_64.tar.gz`
-   - `axiom-windows-x64.zip`
-3. Extract; place the `axiom` / `axiom.exe` binary in a directory on your PATH  
-   (recommended: `~/.axiom/bin/` on macOS/Linux)
+Removes **only** Axiom's binary and `~/.axiom` data — never your projects.
 
 ---
 
-## Dependency cache
+## Aegis (v0.1.2) — what improved
 
-For Node projects Axiom can reuse a dependency cache under:
+Aegis is a **correctness and reliability** release. Changes were driven by failures observed against public open-source projects, not by hardcoded special cases.
 
-```text
-~/.axiom/cache/node/<os>-<arch>/<fingerprint>/
-```
+### Smarter project detection
 
-Fingerprints include lockfile content, OS, architecture, and Node major version  
-so a cache from macOS is never restored on Windows, and vice versa.
+- Prefers **metadata** (package.json scripts, pyproject scripts, Cargo targets) over arbitrary files
+- Skips tooling paths (`action/`, `.github/`, `tests/`, `examples/`, …) as application entry points
+- Classifies projects as application / CLI / library / package when evidence supports it
 
-Typical flow:
+### Dependency preparation and isolation
 
-- **First run:** install dependencies → save cache  
-- **Later runs:** cache hit → restore `node_modules` → skip package-manager install
+- **Node:** health checks, repair when broken, OS/arch-scoped dependency cache
+- **Python:** managed virtualenvs under `~/.axiom/cache/python/…` (or project `.venv`); does **not** treat global site-packages as "prepared"
+- Requirements discovery includes `requirements.txt`, `requirements/*.txt`, `pyproject.toml`, `setup.py`, Pipfile
+
+### Rust toolchain and workspaces
+
+- Reads `rust-toolchain` / `rust-toolchain.toml` and Cargo **edition** (e.g. edition 2024)
+- Plans `rustup toolchain install` when a required channel is missing
+- Workspace-aware starts; libraries verified with `cargo check` instead of blind `cargo run`
+
+### Execution semantics and verification
+
+- **Persistent servers** vs **one-shot CLIs** vs **libraries**
+- Exit code **0 is success** for one-shot commands (not a "crash")
+- Port/HTTP readiness checks for servers; structured verification notes for packages
+
+### Diagnostics
+
+Failures report project type, mode, command, path, and actionable hints (e.g. missing `python3-venv`) instead of generic "component failed".
 
 ---
 
-## Build from source (developers only)
+## Supported stacks
 
-Only needed if you are **developing Axiom itself**.
+| Stack | Detection | Prepare | Run / verify |
+|-------|-----------|---------|--------------|
+| Node / npm / Vite / React / Electron | Yes | npm/yarn/pnpm + cache | scripts / server |
+| Python | Yes | managed venv + pip | app/CLI/package modes |
+| Rust | Yes | cargo / rustup when available | bin / lib / workspace |
+| ZIP archives of the above | Yes | same | same |
+| Go / Java / C++ | Detected only | — | limited / unsupported for full orchestration |
 
-```bash
-git clone https://github.com/the1of1matt/axiom.git
-cd axiom
-cargo build --release
-# binary: target/release/axiom
-```
+Axiom does **not** claim to run every repository on GitHub.
 
-Requirements for developers: a recent Rust toolchain (`rustup`).
+---
 
-End users should **never** be told to run `cargo build`.
+## Benchmark integrity (Aegis)
+
+Public projects were used to find failure modes. Historical results are not rewritten. Re-runs are labeled **BEFORE Aegis** vs **AFTER Aegis**.
+
+Statuses used:
+
+| Status | Meaning |
+|--------|---------|
+| **PASS** | Detection, preparation, and execution/verification succeeded for the intended mode |
+| **FAIL** | Axiom attempted the work and failed (bug or environment) |
+| **INCONCLUSIVE** | Ambiguous entry point, missing host tooling (e.g. no `ensurepip`), or upstream broken |
+| **UNSUPPORTED** | Outside supported orchestration (e.g. pure library with no run target, other languages) |
+
+### Representative outcomes (fixture verification after Aegis)
+
+| Class | Example shape | After Aegis |
+|-------|---------------|-------------|
+| Rust CLI | `src/main.rs` binary | **PASS** — exit 0 treated as success |
+| Rust library | `src/lib.rs` only | **PASS** — `cargo check`, not "server crash" |
+| Python package + `action/main.py` | metadata package (Black-like) | Does **not** run Actions wrappers as the app |
+| Python web app | Flask + `requirements.txt` | Plans managed venv + install; needs host `python3-venv` |
+| Node one-shot / server | package.json scripts | Prepare + start; server mode when frameworks detected |
+
+Full upstream clones may still **FAIL** or be **INCONCLUSIVE** for host reasons (old global Rust without rustup, missing Python venv support). That is reported honestly.
 
 ---
 
@@ -146,33 +173,27 @@ End users should **never** be told to run `cargo build`.
 | `axiom doctor` | Reports OS, arch, toolchains, Axiom home, health |
 | `axiom uninstall` | Removes Axiom binary + `~/.axiom` only |
 
-Supported stacks (detection / run, MVP and later):
+---
 
-- Node / npm / Electron / Vite / React  
-- Python (`requirements.txt`, `pyproject.toml`)  
-- Rust (`Cargo.toml`)  
-- ZIP archives of the above  
+## Dependency cache (Node)
+
+```text
+~/.axiom/cache/node/<os>-<arch>/<fingerprint>/
+```
+
+Fingerprints include lockfile content, OS, architecture, and Node major version. A macOS cache is never restored on Windows.
 
 ---
 
-## GitHub Releases (maintainers)
-
-Release assets must use these **exact** names (produced by `.github/workflows/release.yml`):
-
-```text
-axiom-macos-aarch64.tar.gz
-axiom-linux-x86_64.tar.gz
-axiom-windows-x64.zip
-```
-
-Tag and push:
+## Build from source (developers only)
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git clone https://github.com/the1of1matt/axiom.git
+cd axiom
+cargo build --release
 ```
 
-Or run the **Release** workflow with a tag input.
+End users should **never** be told to run `cargo build`.
 
 ---
 
@@ -180,13 +201,19 @@ Or run the **Release** workflow with a tag input.
 
 ```text
 ~/.axiom/
-├── bin/axiom          # the CLI binary
+├── bin/axiom
+├── cache/          # node + python managed envs
 ├── toolchains/
 ├── packages/
-├── cache/
 ├── projects/
-└── tmp/
+└── tmp/            # ZIP extracts (Axiom-owned)
 ```
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for **v0.1.2-aegis** notes.
 
 ---
 
