@@ -1,7 +1,8 @@
 //! Orchestrate project components and external providers.
 
 use std::process::{Command, Stdio, Child};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::net::TcpStream;
@@ -176,9 +177,34 @@ pub fn orchestrate(graph: &ApplicationGraph, verbose: bool) -> Result<RunningApp
             }
             continue;
         }
-        for start_cmd in &c.start {
+        // Multi-step starts (CMake/Make/Meson/Java): run build steps synchronously,
+            // then spawn only the final runtime command.
+            let (build_steps, run_cmd) = split_build_and_run(&c.start);
+            for step_cmd in &build_steps {
+                if let Some(rest) = step_cmd.strip_prefix("__axiom_mkdir__") {
+                    let p = PathBuf::from(rest);
+                    fs::create_dir_all(&p)
+                        .with_context(|| format!("mkdir {}", p.display()))?;
+                    continue;
+                }
+                if step_cmd.starts_with("__axiom_") {
+                    continue;
+                }
+                println!("✓ Building {} — {}", c.id, step_cmd);
+                run_foreground(&c.info.path, step_cmd, verbose)?;
+            }
+            let Some(start_cmd) = run_cmd else {
+                // Build-only success path
+                println!("  ✓ {} build completed", c.id);
+                continue;
+            };
+            let start_cmd = if let Some(bin) = start_cmd.strip_prefix("__axiom_run_bin__") {
+                bin.to_string()
+            } else {
+                start_cmd
+            };
             println!("✓ Starting {} — {}", c.id, start_cmd);
-            let child = spawn_background(&c.info.path, start_cmd, verbose)?;
+            let child = spawn_background(&c.info.path, &start_cmd, verbose)?;
             let mut mp = ManagedProcess {
                 id: c.id.clone(),
                 child,
@@ -196,7 +222,6 @@ pub fn orchestrate(graph: &ApplicationGraph, verbose: bool) -> Result<RunningApp
                         c.id, code
                     );
                     mp.ready = true;
-                    // Process already exited — do not keep a dead child around
                     let _ = mp.child.wait();
                     continue;
                 }
@@ -223,7 +248,6 @@ pub fn orchestrate(graph: &ApplicationGraph, verbose: bool) -> Result<RunningApp
                 }
             }
             children.push(mp);
-        }
     }
 
     print_final_status(graph, &children, all_ready);
@@ -330,8 +354,17 @@ fn verify_non_server(c: &Component, verbose: bool) -> Result<VerificationResult>
     notes.push(format!("class={:?}", c.project_class));
     notes.push(format!("mode={:?}", c.execution_mode));
 
-    if c.start.is_empty() {
-        notes.push("no start command — treating as library/package".into());
+    if c.start.is_empty()
+        || matches!(
+            c.execution_mode,
+            ExecutionMode::Library | ExecutionMode::BuildOnly
+        )
+    {
+        if c.start.is_empty() {
+            notes.push("no start command — treating as library/package".into());
+        } else {
+            notes.push("library/build-only — verifying via build tool".into());
+        }
         // For Rust libraries: cargo check
         if c.info.has_cargo_toml {
             println!("✓ Verifying Rust package {} (cargo check)...", c.id);
@@ -387,6 +420,126 @@ fn verify_non_server(c: &Component, verbose: bool) -> Result<VerificationResult>
                 health: "no application entry point".into(),
                 exit_code: None,
                 result: VerifyOutcome::Skipped,
+                notes,
+            });
+        }
+        // Go library: `go build ./...` as verification
+        if c.info.has_go_mod || c.info.kinds.contains(&crate::detect::ProjectKind::Go) {
+            println!("✓ Verifying Go package {} (go build ./...)...", c.id);
+            let mut cmd = Command::new("go");
+            cmd.args(["build", "./..."]);
+            cmd.current_dir(&c.info.path);
+            let status = cmd.status().context("go build")?;
+            if status.success() {
+                return Ok(VerificationResult {
+                    project_type: format!("Go {:?}", c.project_class),
+                    environment_prepared: true,
+                    dependencies_installed: true,
+                    process_started: false,
+                    listening_port: None,
+                    health: "go build OK".into(),
+                    exit_code: status.code(),
+                    result: VerifyOutcome::Pass,
+                    notes,
+                });
+            }
+            return Ok(VerificationResult {
+                project_type: format!("Go {:?}", c.project_class),
+                environment_prepared: true,
+                dependencies_installed: false,
+                process_started: false,
+                listening_port: None,
+                health: format!("go build failed: {}", status),
+                exit_code: status.code(),
+                result: VerifyOutcome::Fail,
+                notes,
+            });
+        }
+        // Java library: Maven/Gradle package/build
+        if c.info.kinds.contains(&crate::detect::ProjectKind::Java) {
+            if c.info.path.join("pom.xml").is_file() {
+                let mvn = if c.info.path.join("mvnw").is_file() || c.info.path.join("mvnw.cmd").is_file() {
+                    if cfg!(windows) { ".\\mvnw.cmd" } else { "./mvnw" }
+                } else {
+                    "mvn"
+                };
+                println!("✓ Verifying Maven package {} ({} package)...", c.id, mvn);
+                let status = run_foreground_status(&c.info.path, &format!("{} -q -DskipTests package", mvn))?;
+                let ok = status.success();
+                return Ok(VerificationResult {
+                    project_type: format!("Java/Maven {:?}", c.project_class),
+                    environment_prepared: true,
+                    dependencies_installed: ok,
+                    process_started: false,
+                    listening_port: None,
+                    health: if ok { "mvn package OK".into() } else { format!("mvn package failed: {}", status) },
+                    exit_code: status.code(),
+                    result: if ok { VerifyOutcome::Pass } else { VerifyOutcome::Fail },
+                    notes,
+                });
+            }
+            if c.info.path.join("build.gradle").is_file() || c.info.path.join("build.gradle.kts").is_file() {
+                let gradle = if c.info.path.join("gradlew").is_file() || c.info.path.join("gradlew.bat").is_file() {
+                    if cfg!(windows) { ".\\gradlew.bat" } else { "./gradlew" }
+                } else {
+                    "gradle"
+                };
+                println!("✓ Verifying Gradle package {} ({} build)...", c.id, gradle);
+                let status = run_foreground_status(&c.info.path, &format!("{} -q build -x test", gradle))?;
+                let ok = status.success();
+                return Ok(VerificationResult {
+                    project_type: format!("Java/Gradle {:?}", c.project_class),
+                    environment_prepared: true,
+                    dependencies_installed: ok,
+                    process_started: false,
+                    listening_port: None,
+                    health: if ok { "gradle build OK".into() } else { format!("gradle build failed: {}", status) },
+                    exit_code: status.code(),
+                    result: if ok { VerifyOutcome::Pass } else { VerifyOutcome::Fail },
+                    notes,
+                });
+            }
+        }
+        // CMake library verification
+        if c.info.kinds.contains(&crate::detect::ProjectKind::CMake) {
+            if !detect::has_command("cmake") {
+                notes.push("cmake not found on PATH".into());
+                return Ok(VerificationResult {
+                    project_type: "CMake library".into(),
+                    environment_prepared: false,
+                    dependencies_installed: false,
+                    process_started: false,
+                    listening_port: None,
+                    health: "cmake missing".into(),
+                    exit_code: None,
+                    result: VerifyOutcome::Fail,
+                    notes,
+                });
+            }
+            let build_dir = std::env::temp_dir().join(format!("axiom-cmake-verify-{}", c.id));
+            let _ = fs::remove_dir_all(&build_dir);
+            println!("✓ Verifying CMake library {}...", c.id);
+            let _ = run_foreground_status(
+                &c.info.path,
+                &format!(
+                    "cmake -S . -B {} -DCMAKE_BUILD_TYPE=Release",
+                    build_dir.display()
+                ),
+            )?;
+            let status = run_foreground_status(
+                &c.info.path,
+                &format!("cmake --build {} --config Release", build_dir.display()),
+            )?;
+            let ok = status.success();
+            return Ok(VerificationResult {
+                project_type: "CMake library".into(),
+                environment_prepared: true,
+                dependencies_installed: ok,
+                process_started: false,
+                listening_port: None,
+                health: if ok { "cmake build OK".into() } else { format!("cmake build failed: {}", status) },
+                exit_code: status.code(),
+                result: if ok { VerifyOutcome::Pass } else { VerifyOutcome::Fail },
                 notes,
             });
         }
@@ -761,6 +914,103 @@ fn print_final_status(graph: &ApplicationGraph, children: &[ManagedProcess], all
         println!();
         println!("Press Ctrl+C to stop all components.");
     }
+}
+
+/// Split a start command list into synchronous build steps and an optional final run command.
+/// Commands prefixed with `__axiom_run_bin__` are always the final run step.
+fn split_build_and_run(start: &[String]) -> (Vec<String>, Option<String>) {
+    if start.is_empty() {
+        return (vec![], None);
+    }
+    // If any command is __axiom_run_bin__, everything before it is build; that one is run.
+    if let Some(idx) = start.iter().position(|s| s.starts_with("__axiom_run_bin__")) {
+        let build: Vec<String> = start[..idx].to_vec();
+        return (build, Some(start[idx].clone()));
+    }
+
+    // Commands that *execute* the application (not merely compile/package)
+    let is_run = |s: &str| {
+        let l = s.to_lowercase();
+        l.contains("exec:java")
+            || l.contains("spring-boot:run")
+            || l.contains("bootRun")
+            || l.ends_with(" run")
+            || l.contains(" gradle run")
+            || l.contains("./gradlew") && l.contains(" run")
+            || l.starts_with("java ")
+            || l.starts_with("go run")
+            || l.starts_with("npm run")
+            || l.starts_with("node ")
+            || l.starts_with("python")
+            || l.starts_with("cargo run")
+            || l == "make run"
+            || l.starts_with("make run")
+    };
+
+    let is_build = |s: &str| {
+        if is_run(s) {
+            return false;
+        }
+        s.starts_with("__axiom_mkdir__")
+            || s.starts_with("cmake ")
+            || s.starts_with("meson ")
+            || s == "make"
+            || s.starts_with("make ")
+            || s.starts_with("mvn ")
+            || s.starts_with("./mvnw")
+            || s.starts_with(".\\mvnw")
+            || s.starts_with("gradle ")
+            || s.starts_with("./gradlew")
+            || s.starts_with(".\\gradlew")
+            || s.starts_with("javac ")
+    };
+
+    // Single command: if it's a run command, no build steps
+    if start.len() == 1 {
+        if is_build(&start[0]) && !is_run(&start[0]) {
+            return (start.to_vec(), None);
+        }
+        return (vec![], Some(start[0].clone()));
+    }
+
+    let mut last_build = 0;
+    for (i, s) in start.iter().enumerate() {
+        if is_build(s) {
+            last_build = i + 1;
+        }
+    }
+    if last_build >= start.len() {
+        // Prefer treating the last command as run if it looks executable
+        if is_run(&start[start.len() - 1]) {
+            return (
+                start[..start.len() - 1].to_vec(),
+                Some(start[start.len() - 1].clone()),
+            );
+        }
+        return (start.to_vec(), None);
+    }
+    if last_build == 0 {
+        return (vec![], start.first().cloned());
+    }
+    (
+        start[..last_build].to_vec(),
+        start.get(last_build).cloned(),
+    )
+}
+
+fn run_foreground_status(cwd: &Path, cmd_str: &str) -> Result<std::process::ExitStatus> {
+    let (prog, args) = crate::platform::parse_command_line(cmd_str);
+    if prog.is_empty() {
+        bail!("empty command");
+    }
+    let mut cmd = Command::new(&prog);
+    for a in &args {
+        cmd.arg(a);
+    }
+    cmd.current_dir(cwd)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    cmd.status().with_context(|| format!("failed: {}", cmd_str))
 }
 
 fn run_foreground(cwd: &Path, cmd_str: &str, _verbose: bool) -> Result<()> {

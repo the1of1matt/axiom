@@ -11,6 +11,8 @@ pub enum ProjectKind {
     Python,
     Rust,
     CMake,
+    Make,
+    Meson,
     Tauri,
     Electron,
     Go,
@@ -120,6 +122,10 @@ impl ProjectInfo {
             ProjectKind::Shell
         } else if self.kinds.contains(&ProjectKind::CMake) {
             ProjectKind::CMake
+        } else if self.kinds.contains(&ProjectKind::Meson) {
+            ProjectKind::Meson
+        } else if self.kinds.contains(&ProjectKind::Make) {
+            ProjectKind::Make
         } else if self.kinds.contains(&ProjectKind::Java) {
             ProjectKind::Java
         } else {
@@ -161,9 +167,12 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
         || path.join("vite.config.mjs").is_file()
         || path.join("vite.config.mts").is_file();
     let has_go_mod = path.join("go.mod").is_file();
+    let has_go_work = path.join("go.work").is_file();
     let has_pom = path.join("pom.xml").is_file();
     let has_gradle = path.join("build.gradle").is_file()
         || path.join("build.gradle.kts").is_file();
+    let has_makefile = path.join("Makefile").is_file() || path.join("makefile").is_file();
+    let has_meson = path.join("meson.build").is_file();
 
     if has_package_json {
         markers.push("package.json".into());
@@ -193,13 +202,31 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
         markers.push("vite.config".into());
         kinds.push(ProjectKind::Vite);
     }
-    if has_go_mod {
-        markers.push("go.mod".into());
+    if has_go_mod || has_go_work {
+        if has_go_mod {
+            markers.push("go.mod".into());
+        }
+        if has_go_work {
+            markers.push("go.work".into());
+        }
         kinds.push(ProjectKind::Go);
     }
     if has_pom || has_gradle {
         markers.push(if has_pom { "pom.xml" } else { "build.gradle" }.into());
         kinds.push(ProjectKind::Java);
+    }
+    // Make/Meson: prefer when directory is not already claimed by a higher-level stack
+    if has_makefile
+        && !kinds
+            .iter()
+            .any(|k| matches!(k, ProjectKind::Node | ProjectKind::Rust | ProjectKind::Python | ProjectKind::Go | ProjectKind::Java | ProjectKind::CMake))
+    {
+        markers.push("Makefile".into());
+        kinds.push(ProjectKind::Make);
+    }
+    if has_meson && !kinds.contains(&ProjectKind::CMake) && !kinds.contains(&ProjectKind::Meson) {
+        markers.push("meson.build".into());
+        kinds.push(ProjectKind::Meson);
     }
 
     let mut package_scripts = None;
@@ -248,6 +275,16 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
         } else if path.join("index.js").is_file() || path.join("src/index.js").is_file() {
             markers.push("index.js".into());
             kinds.push(ProjectKind::Node);
+        } else if path.join("src/main/java").is_dir()
+            || path.join("settings.gradle").is_file()
+            || path.join("settings.gradle.kts").is_file()
+        {
+            markers.push(if path.join("src/main/java").is_dir() {
+                "src/main/java".into()
+            } else {
+                "settings.gradle".into()
+            });
+            kinds.push(ProjectKind::Java);
         } else {
             return None;
         }
@@ -291,10 +328,14 @@ pub fn find_projects_under(root: &Path, max_depth: usize) -> Vec<ProjectInfo> {
         "requirements.txt",
         "CMakeLists.txt",
         "go.mod",
+        "go.work",
         "pom.xml",
         "build.gradle",
         "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
         "tauri.conf.json",
+        "meson.build",
         "server.py",
         "app.py",
         "main.py",
@@ -306,6 +347,7 @@ pub fn find_projects_under(root: &Path, max_depth: usize) -> Vec<ProjectInfo> {
         "docker-compose.yml",
         "compose.yml",
         "Makefile",
+        "makefile",
     ];
 
     let walker = WalkDir::new(root)
@@ -712,6 +754,24 @@ pub fn classify_target(
         return classify_python(info, start);
     }
 
+    // Go
+    if info.kinds.contains(&ProjectKind::Go) || info.has_go_mod {
+        return classify_go(info);
+    }
+
+    // C++ / build systems
+    if info.kinds.contains(&ProjectKind::CMake)
+        || info.kinds.contains(&ProjectKind::Make)
+        || info.kinds.contains(&ProjectKind::Meson)
+    {
+        return classify_cpp(info);
+    }
+
+    // Java
+    if info.kinds.contains(&ProjectKind::Java) {
+        return classify_java(info);
+    }
+
     if start.is_empty() {
         return (ExecutionMode::Ambiguous, ProjectClass::Unknown);
     }
@@ -976,13 +1036,617 @@ pub fn toolchain_status(info: &ProjectInfo) -> Vec<(String, bool, String)> {
         }
         ProjectKind::Go => {
             let go = has_command("go");
-            status.push(("go".into(), go, if go { "found".into() } else { "missing".into() }));
+            let detail = if go {
+                go_version_string().unwrap_or_else(|| "found".into())
+            } else {
+                "missing".into()
+            };
+            status.push(("go".into(), go, detail));
+            if let Some(req) = go_required_version(&info.path) {
+                status.push((
+                    "go-required".into(),
+                    true,
+                    format!("project requires go {}", req),
+                ));
+            }
         }
         ProjectKind::CMake => {
             let cmake = has_command("cmake");
             status.push(("cmake".into(), cmake, if cmake { "found".into() } else { "missing".into() }));
+            let cxx = has_command("c++") || has_command("g++") || has_command("clang++");
+            status.push(("c++".into(), cxx, if cxx { "found".into() } else { "missing".into() }));
         }
-        ProjectKind::Java | ProjectKind::Unknown => {}
+        ProjectKind::Make => {
+            let make = has_command("make");
+            status.push(("make".into(), make, if make { "found".into() } else { "missing".into() }));
+            let cxx = has_command("c++") || has_command("g++") || has_command("clang++");
+            status.push(("c++".into(), cxx, if cxx { "found".into() } else { "missing".into() }));
+        }
+        ProjectKind::Meson => {
+            let meson = has_command("meson");
+            let ninja = has_command("ninja");
+            status.push(("meson".into(), meson, if meson { "found".into() } else { "missing".into() }));
+            status.push(("ninja".into(), ninja, if ninja { "found".into() } else { "missing".into() }));
+        }
+        ProjectKind::Java => {
+            let java = has_command("java");
+            let javac = has_command("javac");
+            status.push(("java".into(), java, if java { "found".into() } else { "missing".into() }));
+            status.push(("javac".into(), javac, if javac { "found".into() } else { "missing".into() }));
+            let has_mvnw = info.path.join("mvnw").is_file() || info.path.join("mvnw.cmd").is_file();
+            let has_gradlew = info.path.join("gradlew").is_file() || info.path.join("gradlew.bat").is_file();
+            if info.path.join("pom.xml").is_file() {
+                let mvn = has_mvnw || has_command("mvn");
+                status.push((
+                    "maven".into(),
+                    mvn,
+                    if has_mvnw {
+                        "wrapper".into()
+                    } else if has_command("mvn") {
+                        "found".into()
+                    } else {
+                        "missing".into()
+                    },
+                ));
+            }
+            if info.path.join("build.gradle").is_file() || info.path.join("build.gradle.kts").is_file() {
+                let gradle = has_gradlew || has_command("gradle");
+                status.push((
+                    "gradle".into(),
+                    gradle,
+                    if has_gradlew {
+                        "wrapper".into()
+                    } else if has_command("gradle") {
+                        "found".into()
+                    } else {
+                        "missing".into()
+                    },
+                ));
+            }
+        }
+        ProjectKind::Unknown => {}
     }
     status
+}
+
+/// Parsed go.mod metadata (lightweight — no `go` invocation).
+#[derive(Debug, Clone, Default)]
+pub struct GoModInfo {
+    pub module: Option<String>,
+    pub go_version: Option<String>,
+    pub has_require: bool,
+}
+
+pub fn parse_go_mod(root: &Path) -> GoModInfo {
+    let mut info = GoModInfo::default();
+    let Ok(content) = fs::read_to_string(root.join("go.mod")) else {
+        return info;
+    };
+    for line in content.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("module ") {
+            info.module = Some(rest.trim().to_string());
+        } else if let Some(rest) = t.strip_prefix("go ") {
+            let ver = rest.trim().split_whitespace().next().unwrap_or("").to_string();
+            if !ver.is_empty() {
+                info.go_version = Some(ver);
+            }
+        } else if t.starts_with("require ") || t == "require (" {
+            info.has_require = true;
+        }
+    }
+    info
+}
+
+pub fn go_required_version(root: &Path) -> Option<String> {
+    parse_go_mod(root).go_version
+}
+
+pub fn go_version_string() -> Option<String> {
+    let out = std::process::Command::new("go")
+        .args(["version"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    // go version go1.22.2 linux/amd64
+    s.split_whitespace().nth(2).map(|v| v.to_string())
+}
+
+/// Discover executable Go packages (package main) under the module.
+/// Prefers cmd/<name> layout; avoids tests/examples/.git.
+pub fn go_main_packages(root: &Path) -> Vec<String> {
+    use walkdir::WalkDir;
+    let mut pkgs = Vec::new();
+
+    // Conventional cmd/ directory
+    let cmd_dir = root.join("cmd");
+    if cmd_dir.is_dir() {
+        if let Ok(rd) = fs::read_dir(&cmd_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if dir_has_package_main(&p) {
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            pkgs.push(format!("./cmd/{}", name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Root package main
+    if dir_has_package_main(root) {
+        pkgs.push(".".into());
+    }
+
+    // Other package-main dirs (shallow), skipping noise
+    let skip = [
+        "vendor", ".git", "node_modules", "testdata", "tests", "test", "examples",
+        "docs", "documentation", ".github", "internal", "pkg", "api", "scripts",
+    ];
+    for entry in WalkDir::new(root)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !skip.iter().any(|s| *s == name) && !name.starts_with('.')
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let p = entry.path();
+        if p == root || p.starts_with(&cmd_dir) {
+            continue;
+        }
+        if dir_has_package_main(p) {
+            if let Ok(rel) = p.strip_prefix(root) {
+                let s = format!("./{}", rel.to_string_lossy().replace('\\', "/"));
+                if !pkgs.contains(&s) {
+                    pkgs.push(s);
+                }
+            }
+        }
+    }
+    pkgs
+}
+
+fn dir_has_package_main(dir: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("go") {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.ends_with("_test.go") {
+            continue;
+        }
+        if let Ok(s) = fs::read_to_string(&p) {
+            // package main at file start (allow comments)
+            for line in s.lines() {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with("//") {
+                    continue;
+                }
+                if t.starts_with("/*") {
+                    continue;
+                }
+                return t == "package main";
+            }
+        }
+    }
+    false
+}
+
+fn classify_go(info: &ProjectInfo) -> (crate::model::ExecutionMode, crate::model::ProjectClass) {
+    use crate::model::{ExecutionMode, ProjectClass};
+    let mains = go_main_packages(&info.path);
+    if mains.is_empty() {
+        // Module with no package main → library
+        return (ExecutionMode::Library, ProjectClass::Library);
+    }
+    if mains.len() == 1 {
+        return (ExecutionMode::OneShotCli, ProjectClass::Cli);
+    }
+    // Multiple executables — still runnable once a target is chosen
+    (ExecutionMode::OneShotCli, ProjectClass::Application)
+}
+
+/// Start commands for Go modules. Empty when library-only or ambiguous multi-main.
+pub fn go_start_commands(info: &ProjectInfo) -> Vec<String> {
+    let mains = go_main_packages(&info.path);
+    if mains.is_empty() {
+        return vec![];
+    }
+    if mains.len() == 1 {
+        let target = &mains[0];
+        if target == "." {
+            return vec!["go run .".into()];
+        }
+        return vec![format!("go run {}", target)];
+    }
+    // Prefer cmd/<dirname> matching module basename
+    let base = info.name.clone();
+    if let Some(preferred) = mains.iter().find(|p| p.ends_with(&format!("/{}", base))) {
+        return vec![format!("go run {}", preferred)];
+    }
+    // Prefer ./cmd/... over others
+    if let Some(preferred) = mains.iter().find(|p| p.starts_with("./cmd/")) {
+        return vec![format!("go run {}", preferred)];
+    }
+    // Ambiguous — do not guess
+    vec![]
+}
+
+fn classify_cpp(info: &ProjectInfo) -> (crate::model::ExecutionMode, crate::model::ProjectClass) {
+    use crate::model::{ExecutionMode, ProjectClass};
+    // Prefer executable evidence from CMakeLists / meson / Makefile names
+    let blob = [
+        "CMakeLists.txt",
+        "meson.build",
+        "Makefile",
+        "makefile",
+    ]
+    .iter()
+    .filter_map(|f| fs::read_to_string(info.path.join(f)).ok())
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_lowercase();
+
+    let looks_lib = (blob.contains("add_library") && !blob.contains("add_executable"))
+        || (blob.contains("library(") && !blob.contains("executable("));
+    if looks_lib {
+        return (ExecutionMode::Library, ProjectClass::Library);
+    }
+    if blob.contains("add_executable") || blob.contains("executable(") {
+        return (ExecutionMode::OneShotCli, ProjectClass::Application);
+    }
+    // Make projects are often applications; default to one-shot when Makefile present
+    if info.kinds.contains(&ProjectKind::Make) {
+        return (ExecutionMode::OneShotCli, ProjectClass::Application);
+    }
+    (ExecutionMode::BuildOnly, ProjectClass::Unknown)
+}
+
+fn classify_java(info: &ProjectInfo) -> (crate::model::ExecutionMode, crate::model::ProjectClass) {
+    use crate::model::{ExecutionMode, ProjectClass};
+    let pom = fs::read_to_string(info.path.join("pom.xml")).unwrap_or_default();
+    let gradle = fs::read_to_string(info.path.join("build.gradle"))
+        .or_else(|_| fs::read_to_string(info.path.join("build.gradle.kts")))
+        .unwrap_or_default();
+    let blob = format!("{}\n{}", pom, gradle).to_lowercase();
+
+    if blob.contains("<packaging>pom</packaging>") {
+        return (ExecutionMode::BuildOnly, ProjectClass::Application);
+    }
+    if blob.contains("spring-boot") || blob.contains("org.springframework.boot") {
+        return (ExecutionMode::PersistentServer, ProjectClass::Application);
+    }
+    // Explicit main class / application plugin → one-shot CLI unless framework is a server
+    if blob.contains("mainclass")
+        || blob.contains("main-class")
+        || blob.contains("application {")
+        || blob.contains("application{")
+        || blob.contains("id 'application'")
+        || blob.contains("id(\"application\")")
+    {
+        return (ExecutionMode::OneShotCli, ProjectClass::Application);
+    }
+    if blob.contains("<packaging>jar</packaging>")
+        || blob.contains("java-library")
+        || blob.contains("com.android.library")
+    {
+        // May still have a main; treat as library unless mainClass is set
+        if !blob.contains("mainclass") && !blob.contains("main-class") {
+            return (ExecutionMode::Library, ProjectClass::Library);
+        }
+    }
+    if info.path.join("src/main/java").is_dir() {
+        return (ExecutionMode::OneShotCli, ProjectClass::Application);
+    }
+    (ExecutionMode::BuildOnly, ProjectClass::Unknown)
+}
+
+/// CMake: out-of-source build under Axiom cache, then run the primary executable target.
+pub fn cmake_start_commands(info: &ProjectInfo) -> Vec<String> {
+    if !has_command("cmake") {
+        return vec![];
+    }
+    let build_dir = cpp_build_dir(&info.path, "cmake");
+    let mut cmds = Vec::new();
+    cmds.push(format!(
+        "cmake -S . -B {} -DCMAKE_BUILD_TYPE=Release",
+        shell_quote_path(&build_dir)
+    ));
+    cmds.push(format!("cmake --build {} --config Release", shell_quote_path(&build_dir)));
+    if let Some(exe) = cmake_guess_executable(info) {
+        let exe_path = build_dir.join(&exe);
+        cmds.push(format!("__axiom_run_bin__{}", exe_path.display()));
+    }
+    cmds
+}
+
+fn cmake_guess_executable(info: &ProjectInfo) -> Option<String> {
+    let cmake = fs::read_to_string(info.path.join("CMakeLists.txt")).ok()?;
+    for line in cmake.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("add_executable") {
+            let rest = rest.trim_start_matches('(').trim();
+            let name = rest.split_whitespace().next()?.trim_matches('"').trim_matches('\'');
+            if !name.is_empty() && name != "EXCLUDE_FROM_ALL" {
+                return Some(name.to_string());
+            }
+        }
+    }
+    Some(info.name.clone())
+}
+
+pub fn make_start_commands(info: &ProjectInfo) -> Vec<String> {
+    if !has_command("make") {
+        return vec![];
+    }
+    let makefile = if info.path.join("Makefile").is_file() {
+        "Makefile"
+    } else if info.path.join("makefile").is_file() {
+        "makefile"
+    } else {
+        return vec![];
+    };
+    let content = fs::read_to_string(info.path.join(makefile)).unwrap_or_default();
+    let targets = make_targets(&content);
+    let mut cmds = Vec::new();
+    if targets.iter().any(|t| t == "all") {
+        cmds.push("make all".into());
+    } else if targets.iter().any(|t| t == "build") {
+        cmds.push("make build".into());
+    } else {
+        cmds.push("make".into());
+    }
+    if targets.iter().any(|t| t == "run") {
+        cmds.push("make run".into());
+    } else if let Some(exe) = make_guess_binary(&content, &info.name) {
+        cmds.push(format!("__axiom_run_bin__./{}", exe));
+    }
+    cmds
+}
+
+fn make_targets(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        if line.starts_with('\t') || line.starts_with(' ') {
+            continue;
+        }
+        if let Some(idx) = line.find(':') {
+            let name = line[..idx].trim();
+            if name.is_empty() || name.contains('=') || name.starts_with('.') || name.contains('%') {
+                continue;
+            }
+            for part in name.split_whitespace() {
+                out.push(part.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn make_guess_binary(content: &str, project_name: &str) -> Option<String> {
+    for line in content.lines() {
+        let t = line.trim();
+        for key in ["TARGET", "BIN", "PROGRAM", "EXE", "NAME"] {
+            if let Some(rest) = t.strip_prefix(key) {
+                let rest = rest.trim().trim_start_matches('=').trim();
+                if !rest.is_empty() && !rest.contains(' ') {
+                    return Some(rest.trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    Some(project_name.to_string())
+}
+
+pub fn meson_start_commands(info: &ProjectInfo) -> Vec<String> {
+    if !has_command("meson") {
+        return vec![];
+    }
+    let build_dir = cpp_build_dir(&info.path, "meson");
+    let mut cmds = Vec::new();
+    cmds.push(format!("meson setup {} --buildtype=release", shell_quote_path(&build_dir)));
+    cmds.push(format!("meson compile -C {}", shell_quote_path(&build_dir)));
+    if let Some(exe) = meson_guess_executable(info) {
+        cmds.push(format!("__axiom_run_bin__{}/{}", build_dir.display(), exe));
+    }
+    cmds
+}
+
+fn meson_guess_executable(info: &ProjectInfo) -> Option<String> {
+    let meson = fs::read_to_string(info.path.join("meson.build")).ok()?;
+    for line in meson.lines() {
+        let t = line.trim();
+        if t.contains("executable(") {
+            if let Some(start) = t.find('\'') {
+                let rest = &t[start + 1..];
+                if let Some(end) = rest.find('\'') {
+                    let name = &rest[..end];
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            if let Some(start) = t.find('"') {
+                let rest = &t[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    let name = &rest[..end];
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Some(info.name.clone())
+}
+
+fn cpp_build_dir(project: &Path, backend: &str) -> PathBuf {
+    if let Some(cache) = crate::platform::axiom_cache() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        project.hash(&mut hasher);
+        let key = format!("{:x}", hasher.finish());
+        return cache.join("build").join(backend).join(key);
+    }
+    project.join(format!("build-axiom-{}", backend))
+}
+
+fn shell_quote_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if s.contains(' ') {
+        format!("\"{}\"", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Java start: Maven/Gradle application run, or plain javac+java.
+pub fn java_start_commands(info: &ProjectInfo) -> Vec<String> {
+    let has_pom = info.path.join("pom.xml").is_file();
+    let has_gradle = info.path.join("build.gradle").is_file()
+        || info.path.join("build.gradle.kts").is_file();
+    let mvnw = if cfg!(windows) {
+        info.path.join("mvnw.cmd").is_file()
+    } else {
+        info.path.join("mvnw").is_file()
+    };
+    let gradlew = if cfg!(windows) {
+        info.path.join("gradlew.bat").is_file()
+    } else {
+        info.path.join("gradlew").is_file()
+    };
+
+    if has_pom {
+        let mvn = if mvnw {
+            if cfg!(windows) { ".\\mvnw.cmd" } else { "./mvnw" }
+        } else if has_command("mvn") {
+            "mvn"
+        } else {
+            return vec![];
+        };
+        let pom = fs::read_to_string(info.path.join("pom.xml")).unwrap_or_default();
+        if pom.contains("spring-boot") {
+            return vec![format!("{} -q spring-boot:run", mvn)];
+        }
+        if pom.contains("exec-maven-plugin") || pom.to_lowercase().contains("<mainclass>") {
+            return vec![format!("{} -q compile exec:java", mvn)];
+        }
+        return vec![format!("{} -q -DskipTests package", mvn)];
+    }
+
+    if has_gradle {
+        let gradle = if gradlew {
+            if cfg!(windows) { ".\\gradlew.bat" } else { "./gradlew" }
+        } else if has_command("gradle") {
+            "gradle"
+        } else {
+            return vec![];
+        };
+        let build = fs::read_to_string(info.path.join("build.gradle"))
+            .or_else(|_| fs::read_to_string(info.path.join("build.gradle.kts")))
+            .unwrap_or_default();
+        if build.contains("org.springframework.boot") || build.contains("application") {
+            return vec![format!("{} -q run", gradle)];
+        }
+        return vec![format!("{} -q build -x test", gradle)];
+    }
+
+    if let Some(main_class) = find_java_main_class(&info.path) {
+        let out = cpp_build_dir(&info.path, "javac");
+        return vec![
+            format!("__axiom_mkdir__{}", out.display()),
+            format!("javac -d {} {}", shell_quote_path(&out), java_sources_arg(info)),
+            format!("java -cp {} {}", shell_quote_path(&out), main_class),
+        ];
+    }
+    vec![]
+}
+
+fn java_sources_arg(info: &ProjectInfo) -> String {
+    // Enumerate .java files rather than relying on shell globs (cross-platform).
+    use walkdir::WalkDir;
+    let mut files = Vec::new();
+    let root = if info.path.join("src/main/java").is_dir() {
+        info.path.join("src/main/java")
+    } else {
+        info.path.clone()
+    };
+    for entry in WalkDir::new(&root).max_depth(12).into_iter().flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("java") {
+            if let Ok(rel) = p.strip_prefix(&info.path) {
+                files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        if files.len() > 200 {
+            break;
+        }
+    }
+    if files.is_empty() {
+        "*.java".into()
+    } else {
+        files.join(" ")
+    }
+}
+
+fn find_java_main_class(root: &Path) -> Option<String> {
+    use walkdir::WalkDir;
+    let search_roots = [
+        root.join("src/main/java"),
+        root.join("src"),
+        root.to_path_buf(),
+    ];
+    // Note: do not skip a path segment named "example" — that is a common Java package name.
+    let skip = [".git", "target", "build", "test", "tests", "examples", ".github"];
+    for sr in &search_roots {
+        if !sr.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(sr)
+            .max_depth(8)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !skip.iter().any(|s| *s == name)
+            })
+            .flatten()
+        {
+            let p = entry.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("java") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(p) else { continue };
+            if !content.contains("public static void main") {
+                continue;
+            }
+            let stem = p.file_stem()?.to_str()?.to_string();
+            let package = content.lines().find_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("package ").map(|r| r.trim().trim_end_matches(';').to_string())
+            });
+            return Some(match package {
+                Some(pkg) if !pkg.is_empty() => format!("{}.{}", pkg, stem),
+                _ => stem,
+            });
+        }
+        break;
+    }
+    None
 }

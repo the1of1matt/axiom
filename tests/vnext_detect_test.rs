@@ -8,6 +8,8 @@ use tempfile::tempdir;
 fn axiom_bin() -> std::path::PathBuf {
     // Prefer freshly built target
     let candidates = [
+        "/tmp/axiom-target3/debug/axiom",
+        "/tmp/axiom-target2/debug/axiom",
         "/tmp/axiom-target/debug/axiom",
         "target/debug/axiom",
         "target/release/axiom",

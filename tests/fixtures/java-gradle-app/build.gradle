@@ -1,0 +1,11 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+application {
+    mainClass = 'com.example.App'
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}

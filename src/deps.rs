@@ -123,6 +123,214 @@ pub fn plan_prepare(info: &ProjectInfo, axiom_owned: bool) -> PreparePlan {
         }
     }
 
+    // Go modules
+    if info.has_go_mod || info.kinds.contains(&ProjectKind::Go) {
+        let go_plan = plan_go_prepare(info);
+        plan.reasons.extend(go_plan.reasons);
+        plan.commands.extend(go_plan.commands);
+    }
+
+    // Java (Maven / Gradle)
+    if info.kinds.contains(&ProjectKind::Java) {
+        let j_plan = plan_java_prepare(info);
+        plan.reasons.extend(j_plan.reasons);
+        plan.commands.extend(j_plan.commands);
+    }
+
+    // C++ build systems — configuration is deferred to start/build commands
+    if info.kinds.contains(&ProjectKind::CMake)
+        || info.kinds.contains(&ProjectKind::Make)
+        || info.kinds.contains(&ProjectKind::Meson)
+    {
+        let c_plan = plan_cpp_prepare(info);
+        plan.reasons.extend(c_plan.reasons);
+        plan.commands.extend(c_plan.commands);
+    }
+
+    plan
+}
+
+/// Go module dependency preparation. Prefer vendor when present; otherwise `go mod download`
+/// only when the module graph is not already resolvable (keeps cache-hit runs fast).
+fn plan_go_prepare(info: &ProjectInfo) -> PreparePlan {
+    let mut plan = PreparePlan {
+        commands: Vec::new(),
+        remove_first: None,
+        reasons: Vec::new(),
+    };
+
+    if !detect::has_command("go") {
+        plan.reasons.push("go toolchain not found on PATH".into());
+        return plan;
+    }
+
+    if let Some(req) = detect::go_required_version(&info.path) {
+        if let Some(have) = detect::go_version_string() {
+            // Compare major.minor loosely (go1.22.2 vs 1.22)
+            let req_norm = req.trim_start_matches("go");
+            let have_norm = have.trim_start_matches("go");
+            if version_less(have_norm, req_norm) {
+                plan.reasons.push(format!(
+                    "project requires Go {} but available is {}",
+                    req, have
+                ));
+                // Still attempt; go itself will error clearly
+            }
+        }
+    }
+
+    // Vendor mode: no download needed when vendor/modules.txt exists
+    if info.path.join("vendor/modules.txt").is_file() {
+        plan.reasons.push("vendor/ present — using vendored modules".into());
+        return plan;
+    }
+
+    if !info.path.join("go.mod").is_file() {
+        return plan;
+    }
+
+    // Fast path: if go.sum exists and `go list` succeeds with -mod=readonly, skip download
+    if go_modules_ready(&info.path) {
+        plan.reasons.push("Go modules already available".into());
+        return plan;
+    }
+
+    plan.reasons.push("Go module dependencies need download".into());
+    plan.commands.push("go mod download".into());
+    plan
+}
+
+fn go_modules_ready(root: &Path) -> bool {
+    // Lightweight check: go list with readonly mod mode
+    let status = Command::new("go")
+        .args(["list", "-e", "-m", "-mod=readonly"])
+        .current_dir(root)
+        .env("GOFLAGS", "-mod=readonly")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    matches!(status, Ok(s) if s.success())
+}
+
+/// Compare dotted version strings (1.22.0 vs 1.21). True if a < b.
+fn version_less(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u32> {
+        s.split('.')
+            .filter_map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+            .collect()
+    };
+    let av = parse(a);
+    let bv = parse(b);
+    for i in 0..av.len().max(bv.len()) {
+        let x = av.get(i).copied().unwrap_or(0);
+        let y = bv.get(i).copied().unwrap_or(0);
+        if x < y {
+            return true;
+        }
+        if x > y {
+            return false;
+        }
+    }
+    false
+}
+
+fn plan_java_prepare(info: &ProjectInfo) -> PreparePlan {
+    let mut plan = PreparePlan {
+        commands: Vec::new(),
+        remove_first: None,
+        reasons: Vec::new(),
+    };
+
+    let has_pom = info.path.join("pom.xml").is_file();
+    let has_gradle = info.path.join("build.gradle").is_file()
+        || info.path.join("build.gradle.kts").is_file();
+    let mvnw = if cfg!(windows) {
+        info.path.join("mvnw.cmd")
+    } else {
+        info.path.join("mvnw")
+    };
+    let gradlew = if cfg!(windows) {
+        info.path.join("gradlew.bat")
+    } else {
+        info.path.join("gradlew")
+    };
+
+    if has_pom {
+        let mvn_cmd = if mvnw.is_file() {
+            // Prefer wrapper
+            if cfg!(windows) {
+                ".\\mvnw.cmd".to_string()
+            } else {
+                "./mvnw".to_string()
+            }
+        } else if detect::has_command("mvn") {
+            "mvn".to_string()
+        } else {
+            plan.reasons.push(
+                "Maven project detected but neither mvnw wrapper nor mvn is available".into(),
+            );
+            return plan;
+        };
+        // Dependency resolution only — avoid full package on prepare
+        plan.reasons.push("Maven dependency resolution".into());
+        plan.commands
+            .push(format!("{} -q -DskipTests dependency:resolve", mvn_cmd));
+        return plan;
+    }
+
+    if has_gradle {
+        let gradle_cmd = if gradlew.is_file() {
+            if cfg!(windows) {
+                ".\\gradlew.bat".to_string()
+            } else {
+                "./gradlew".to_string()
+            }
+        } else if detect::has_command("gradle") {
+            "gradle".to_string()
+        } else {
+            plan.reasons.push(
+                "Gradle project detected but neither gradlew wrapper nor gradle is available"
+                    .into(),
+            );
+            return plan;
+        };
+        plan.reasons.push("Gradle dependency resolution".into());
+        // dependencies task is lighter than a full build
+        plan.commands
+            .push(format!("{} -q dependencies", gradle_cmd));
+        return plan;
+    }
+
+    // Plain Java — no remote deps to fetch
+    plan.reasons.push("plain Java project — no dependency manager".into());
+    plan
+}
+
+fn plan_cpp_prepare(info: &ProjectInfo) -> PreparePlan {
+    let mut plan = PreparePlan {
+        commands: Vec::new(),
+        remove_first: None,
+        reasons: Vec::new(),
+    };
+
+    if info.kinds.contains(&ProjectKind::CMake) {
+        if !detect::has_command("cmake") {
+            plan.reasons.push("cmake not found on PATH".into());
+        } else {
+            plan.reasons
+                .push("CMake project — configure/build deferred to run".into());
+        }
+    }
+    if info.kinds.contains(&ProjectKind::Make) {
+        if !detect::has_command("make") {
+            plan.reasons.push("make not found on PATH".into());
+        }
+    }
+    if info.kinds.contains(&ProjectKind::Meson) {
+        if !detect::has_command("meson") {
+            plan.reasons.push("meson not found on PATH".into());
+        }
+    }
     plan
 }
 

@@ -428,7 +428,21 @@ fn start_commands(info: &ProjectInfo) -> Vec<String> {
                 }
             }
         }
-        ProjectKind::Go => cmds.push("go run .".into()),
+        ProjectKind::Go => {
+            cmds.extend(crate::detect::go_start_commands(info));
+        }
+        ProjectKind::CMake => {
+            cmds.extend(crate::detect::cmake_start_commands(info));
+        }
+        ProjectKind::Make => {
+            cmds.extend(crate::detect::make_start_commands(info));
+        }
+        ProjectKind::Meson => {
+            cmds.extend(crate::detect::meson_start_commands(info));
+        }
+        ProjectKind::Java => {
+            cmds.extend(crate::detect::java_start_commands(info));
+        }
         _ => {}
     }
     cmds
