@@ -9,8 +9,8 @@
   <a href="https://axiom.fwh.is/">
     <img src="https://img.shields.io/badge/website-axiom.fwh.is-blue.svg" alt="Website">
   </a>
-  <a href="https://github.com/the1of1matt/axiom/releases/tag/v0.1.3">
-    <img src="https://img.shields.io/badge/release-v0.1.3-green.svg" alt="Release: v0.1.3">
+  <a href="https://github.com/the1of1matt/axiom/releases/tag/v0.1.4">
+    <img src="https://img.shields.io/badge/release-v0.1.4-green.svg" alt="Release: v0.1.4">
   </a>
 </p>
 
