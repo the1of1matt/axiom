@@ -38,26 +38,29 @@ axiom run ~/Desktop/folder
 axiom run ~/Downloads/project.zip
 ```
 
-**Current release:** [Axiom v0.1.3](https://github.com/the1of1matt/axiom/releases/tag/v0.1.3)
+**Current release:** [Axiom v0.1.4](https://github.com/the1of1matt/axiom/releases/tag/v0.1.4)
 
 ---
 
-## What's new (v0.1.3 line)
+## What's new in v0.1.4
 
-v0.1.3 expanded Axiom beyond Node, Python, and Rust. Follow-on work adds broader artifact execution on the same architecture:
+v0.1.4 extends the deterministic **Detect → Classify → Prepare → Build → Run → Verify** pipeline to more real-world artifacts and languages, without AI/LLM features and without a release codename.
 
-- **Go** — module detection, CLI vs library, `go mod download` / `go run` / `go build`
-- **Java** — plain, Maven, Gradle (as in v0.1.3)
-- **C** — standalone `.c` compile with clang/gcc/cc and run
-- **C# / .NET** — `*.csproj` / `*.sln` via `dotnet restore` / `build` / `run`; libraries build-only
-- **Executable JAR** — `java -jar` when `Main-Class` is present
-- **Standalone scripts** — `axiom run app.py` / `app.js` / `app.mjs`
-- **Native binaries** — ELF / Mach-O / PE detection and direct launch
-- **Archives** — ZIP and TAR.GZ / TGZ into Axiom-owned temp workspaces
-- **CMake / Make / Meson** — as in v0.1.3
-- Pipeline: **Detect → Classify → Prepare → Build → Run → Verify**
+### New in v0.1.4
 
-No AI/LLM features in this iteration. No release codename.
+- **Standalone C** — `axiom run main.c` (or a directory of `*.c`); compile with available `clang` / `gcc` / `cc`, then run and verify exit status
+- **C# / .NET** — `*.csproj` / `*.sln` via `dotnet restore`, `dotnet build`, and `dotnet run` when the project is an application; class libraries are built and verified only (not launched)
+- **Executable JAR** — inspect `META-INF/MANIFEST.MF` for `Main-Class`, then `java -jar`; library JARs without `Main-Class` get a clear diagnostic instead of a blind launch
+- **Standalone scripts** — `axiom run app.py`, `app.js`, `app.mjs` with the host Python or Node runtime
+- **Native binaries** — lightweight ELF / Mach-O / PE detection and direct launch when appropriate
+- **TAR.GZ / TGZ** — extract into an Axiom-owned temporary workspace (ZIP support unchanged); path-safe cleanup after run
+- **C via CMake / Make** — C targets continue to use the existing build-system orchestration
+
+### Carried forward from v0.1.3
+
+Node / npm / Vite / React / Electron, Python, Rust, Go, plain Java, Maven, Gradle, C++ (CMake / Make), ZIP archives, caching/isolation under `~/.axiom`, and structured diagnostics.
+
+Meson remains detection/classification scaffolding only (not end-to-end verified without `meson` and `ninja` on the host).
 
 ---
 
@@ -161,6 +164,20 @@ Node fingerprints include lockfile content, OS, architecture, and Node major ver
 
 ---
 
+## Tests
+
+The suite currently reports:
+
+- **33** tests passing, **0** failing
+- **26** baseline tests from v0.1.3 (Node / Python / Rust / Go / Java / C++ / scanner / ZIP safety)
+- **7** new v0.1.4 artifact-support tests (C, C#, JAR, standalone scripts)
+
+```bash
+cargo test
+```
+
+---
+
 ## Historical note — v0.1.2-aegis
 
 [v0.1.2-aegis](https://github.com/the1of1matt/axiom/releases/tag/v0.1.2-aegis) was a correctness and reliability release for Node, Python, and Rust:
@@ -172,7 +189,7 @@ Node fingerprints include lockfile content, OS, architecture, and Node major ver
 - Persistent server vs one-shot CLI vs library execution modes
 - Structured PASS / FAIL / partial verification notes
 
-Those behaviors remain in v0.1.3; this release adds Go, Java, and C++ orchestration on the same architecture.
+Those behaviors remain in later releases. [v0.1.3](https://github.com/the1of1matt/axiom/releases/tag/v0.1.3) added Go, Java, and C++ orchestration on the same architecture; v0.1.4 adds broader artifact execution (C, C#, JAR, scripts, native binaries, TAR.GZ).
 
 ---
 
