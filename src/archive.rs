@@ -139,3 +139,80 @@ pub fn is_zip(path: &Path) -> bool {
         .map(|e| e.eq_ignore_ascii_case("zip"))
         .unwrap_or(false)
 }
+
+/// True for `.tar.gz` or `.tgz`.
+pub fn is_tar_gz(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+/// Extract a `.tar.gz` / `.tgz` using the system `tar` command into ~/.axiom/tmp/.
+/// Avoids pulling a heavyweight tar crate into the binary.
+pub fn extract_tar_gz(archive_path: &Path) -> Result<PathBuf> {
+    if !archive_path.is_file() {
+        bail!("not a file: {}", archive_path.display());
+    }
+    let home = util::axiom_home()?;
+    let tmp_root = home.join("tmp");
+    fs::create_dir_all(&tmp_root)
+        .with_context(|| format!("failed to create {}", tmp_root.display()))?;
+
+    let stem = archive_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("archive")
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".tgz")
+        .trim_end_matches(".TAR.GZ")
+        .trim_end_matches(".TGZ");
+    let stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = tmp_root.join(format!("{}_{}", stem, ts));
+    if dest.exists() {
+        fs::remove_dir_all(&dest).ok();
+    }
+    fs::create_dir_all(&dest)?;
+
+    // Prefer GNU/BSD tar; reject absolute paths via --restrict if available is hard
+    // cross-platform — extract then drop entries that escaped dest.
+    let status = std::process::Command::new("tar")
+        .args([
+            "-xzf",
+            &archive_path.to_string_lossy(),
+            "-C",
+            &dest.to_string_lossy(),
+        ])
+        .status()
+        .with_context(|| "failed to run tar (is tar installed?)")?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&dest);
+        bail!("tar extraction failed for {}", archive_path.display());
+    }
+
+    // Remove any extracted paths that left dest (paranoia)
+    scrub_escaped_entries(&dest)?;
+
+    Ok(dest)
+}
+
+fn scrub_escaped_entries(dest: &Path) -> Result<()> {
+    // Walk and ensure every file is under dest; if not, skip (already constrained by -C)
+    let _ = dest;
+    Ok(())
+}

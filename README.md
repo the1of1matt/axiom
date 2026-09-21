@@ -14,6 +14,7 @@
   </a>
 </p>
 
+https://github.com/user-attachments/assets/134168e1-1071-4132-97fa-162c345737e8
 
 ---
 
@@ -41,20 +42,22 @@ axiom run ~/Downloads/project.zip
 
 ---
 
-## What's new in v0.1.3
+## What's new (v0.1.3 line)
 
-v0.1.3 expands Axiom beyond Node, Python, and Rust into real end-to-end orchestration for additional ecosystems:
+v0.1.3 expanded Axiom beyond Node, Python, and Rust. Follow-on work adds broader artifact execution on the same architecture:
 
-- **Go** — module detection (`go.mod` / `go.work`), CLI vs library classification, `go mod download` when needed, `go run` / `go build` verification
-- **Plain Java** — conventional `src/main/java` layouts, main-class discovery, compile into an Axiom-managed output directory, run
-- **Maven** — `pom.xml`, wrapper preference (`mvnw` / `mvnw.cmd`), dependency resolution, application run (`exec:java` / Spring Boot when declared), library package verification
-- **Gradle** — `build.gradle` / `.kts` and settings files, wrapper preference (`gradlew`), application `run` vs library `build` verification
-- **CMake** — out-of-source builds, executable run, library build verification
-- **Make** — target inspection, build and run when appropriate
-- **Meson** — project detection and orchestration scaffolding (see Supported stacks for verification status)
-- Shared **prepare → build → run → verify** pipeline, caching/isolation under `~/.axiom`, and structured diagnostics
+- **Go** — module detection, CLI vs library, `go mod download` / `go run` / `go build`
+- **Java** — plain, Maven, Gradle (as in v0.1.3)
+- **C** — standalone `.c` compile with clang/gcc/cc and run
+- **C# / .NET** — `*.csproj` / `*.sln` via `dotnet restore` / `build` / `run`; libraries build-only
+- **Executable JAR** — `java -jar` when `Main-Class` is present
+- **Standalone scripts** — `axiom run app.py` / `app.js` / `app.mjs`
+- **Native binaries** — ELF / Mach-O / PE detection and direct launch
+- **Archives** — ZIP and TAR.GZ / TGZ into Axiom-owned temp workspaces
+- **CMake / Make / Meson** — as in v0.1.3
+- Pipeline: **Detect → Classify → Prepare → Build → Run → Verify**
 
-This release does **not** use a codename.
+No AI/LLM features in this iteration. No release codename.
 
 ---
 
@@ -113,16 +116,22 @@ Removes **only** Axiom's binary and `~/.axiom` data — never your projects.
 | Node / npm / Vite / React / Electron | Yes | Yes | Yes | Yes | Yes |
 | Python | Yes | Yes | Yes | Yes | Yes |
 | Rust | Yes | Yes | Yes | Yes | Yes |
-| ZIP archives of supported projects | Yes | Yes | Yes | Yes | Yes |
 | Go | Yes | Yes | Yes | Yes | Yes |
 | Plain Java | Yes | Yes | Yes | Yes | Yes |
 | Java / Maven | Yes | Yes | Yes | Yes | Yes |
 | Java / Gradle | Yes | Yes | Yes | Yes | Yes |
+| Executable JAR (`Main-Class`) | Yes | — | — | Yes | Yes |
+| C (standalone `.c`) | Yes | — | Yes | Yes | Yes |
 | C++ / CMake | Yes | Yes | Yes | Yes | Yes |
 | C++ / Make | Yes | Yes | Yes | Yes | Yes |
-| C++ / Meson | Yes | Scaffolding | Scaffolding | Scaffolding | Not E2E-verified in v0.1.3* |
+| C++ / Meson | Yes | Scaffolding | Scaffolding | Scaffolding | Not E2E-verified* |
+| C# / .NET (`*.csproj` / `*.sln`) | Yes | `dotnet restore` | `dotnet build` | `dotnet run`† | Yes |
+| Standalone `.py` / `.js` / `.mjs` | Yes | — | — | Yes | Yes |
+| Native binaries (ELF / Mach-O / PE) | Yes | — | — | Yes | Yes |
+| ZIP / TAR.GZ of supported projects | Yes | Yes | Yes | Yes | Yes |
 
-\* Meson detection and command planning are implemented. Full end-to-end verification was **not** completed in the v0.1.3 release environment because Meson was unavailable there. Treat Meson support as provisional until confirmed on a host with `meson` and `ninja`.
+\* Meson detection and command planning are implemented; full E2E verification requires `meson` + `ninja` on the host.  
+† Class libraries are built and verified; they are not launched as applications.
 
 Axiom does **not** claim to run every repository on GitHub. Libraries are verified with appropriate build/check operations rather than being forced to "run" as applications.
 

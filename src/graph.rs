@@ -10,6 +10,64 @@ use crate::model::{
 use crate::provider;
 use crate::providers;
 
+/// Build a graph from a single-file artifact (script, source, JAR, binary).
+pub fn build_application_from_file(file: &Path) -> Option<ApplicationGraph> {
+    let info = detect::inspect_file(file)?;
+    let name = info.name.clone();
+    let root = info.path.clone();
+    let mut components = expand_runtime_components(info);
+    for c in &mut components {
+        c.role = infer_role(c);
+        refine_start_commands(c);
+        // Single-file artifacts: absolute path in file: marker
+        if let Some(m) = c.info.markers.iter().find(|m| m.starts_with("file:")) {
+            let f = &m[5..];
+            if c.info.kinds.contains(&ProjectKind::Python) {
+                let py = crate::deps::python_interpreter(&c.info.path);
+                c.start = vec![format!("{} {}", py, f)];
+                c.execution_mode = model::ExecutionMode::OneShotCli;
+                c.project_class = model::ProjectClass::Cli;
+                c.role = ComponentRole::Unknown;
+            } else if c.info.kinds.contains(&ProjectKind::Node)
+                && !c.info.kinds.contains(&ProjectKind::Jar)
+            {
+                c.start = vec![format!("node {}", f)];
+                c.execution_mode = model::ExecutionMode::OneShotCli;
+                c.project_class = model::ProjectClass::Cli;
+            } else {
+                if c.start.is_empty() {
+                    c.start = start_commands(&c.info);
+                }
+                let (mode, class) = detect::classify_target(&c.info, &c.start);
+                c.execution_mode = mode;
+                c.project_class = class;
+            }
+        } else {
+            if c.start.is_empty() {
+                c.start = start_commands(&c.info);
+            }
+            let (mode, class) = detect::classify_target(&c.info, &c.start);
+            c.execution_mode = mode;
+            c.project_class = class;
+        }
+        if c.ports.is_empty() {
+            c.ports = discover_ports_for(c);
+        }
+        if let Some(p) = c.ports.first() {
+            c.health_url = Some(format!("http://127.0.0.1:{}/", p));
+        }
+    }
+    uniquify_ids(&mut components);
+    Some(ApplicationGraph {
+        root,
+        name,
+        components,
+        providers: vec![],
+        service_refs: vec![],
+        edges: vec![],
+    })
+}
+
 pub fn build_application(root: &Path) -> ApplicationGraph {
     let name = root
         .file_name()
@@ -442,6 +500,18 @@ fn start_commands(info: &ProjectInfo) -> Vec<String> {
         }
         ProjectKind::Java => {
             cmds.extend(crate::detect::java_start_commands(info));
+        }
+        ProjectKind::CSharp => {
+            cmds.extend(crate::detect::csharp_start_commands(info));
+        }
+        ProjectKind::C => {
+            cmds.extend(crate::detect::c_start_commands(info));
+        }
+        ProjectKind::Jar => {
+            cmds.extend(crate::detect::jar_start_commands(info));
+        }
+        ProjectKind::NativeExe => {
+            cmds.extend(crate::detect::native_exe_start_commands(info));
         }
         _ => {}
     }

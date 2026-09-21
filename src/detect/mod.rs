@@ -17,6 +17,14 @@ pub enum ProjectKind {
     Electron,
     Go,
     Java,
+    /// Pure C (standalone .c or C-only dir without a higher-level stack).
+    C,
+    /// .NET / C# (csproj / sln).
+    CSharp,
+    /// Prebuilt executable JAR (Main-Class in manifest).
+    Jar,
+    /// Already-built native binary (ELF / Mach-O / PE).
+    NativeExe,
     Shell,
     Unknown,
 }
@@ -128,6 +136,14 @@ impl ProjectInfo {
             ProjectKind::Make
         } else if self.kinds.contains(&ProjectKind::Java) {
             ProjectKind::Java
+        } else if self.kinds.contains(&ProjectKind::CSharp) {
+            ProjectKind::CSharp
+        } else if self.kinds.contains(&ProjectKind::C) {
+            ProjectKind::C
+        } else if self.kinds.contains(&ProjectKind::Jar) {
+            ProjectKind::Jar
+        } else if self.kinds.contains(&ProjectKind::NativeExe) {
+            ProjectKind::NativeExe
         } else {
             ProjectKind::Unknown
         }
@@ -173,6 +189,8 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
         || path.join("build.gradle.kts").is_file();
     let has_makefile = path.join("Makefile").is_file() || path.join("makefile").is_file();
     let has_meson = path.join("meson.build").is_file();
+    let has_csproj = dir_has_extension(path, "csproj");
+    let has_sln = dir_has_extension(path, "sln") || path.join("Directory.Build.props").is_file();
 
     if has_package_json {
         markers.push("package.json".into());
@@ -215,11 +233,24 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
         markers.push(if has_pom { "pom.xml" } else { "build.gradle" }.into());
         kinds.push(ProjectKind::Java);
     }
+    if has_csproj || has_sln {
+        markers.push(if has_csproj { "*.csproj" } else { "*.sln" }.into());
+        kinds.push(ProjectKind::CSharp);
+    }
     // Make/Meson: prefer when directory is not already claimed by a higher-level stack
     if has_makefile
-        && !kinds
-            .iter()
-            .any(|k| matches!(k, ProjectKind::Node | ProjectKind::Rust | ProjectKind::Python | ProjectKind::Go | ProjectKind::Java | ProjectKind::CMake))
+        && !kinds.iter().any(|k| {
+            matches!(
+                k,
+                ProjectKind::Node
+                    | ProjectKind::Rust
+                    | ProjectKind::Python
+                    | ProjectKind::Go
+                    | ProjectKind::Java
+                    | ProjectKind::CMake
+                    | ProjectKind::CSharp
+            )
+        })
     {
         markers.push("Makefile".into());
         kinds.push(ProjectKind::Make);
@@ -227,6 +258,13 @@ pub fn inspect(path: &Path) -> Option<ProjectInfo> {
     if has_meson && !kinds.contains(&ProjectKind::CMake) && !kinds.contains(&ProjectKind::Meson) {
         markers.push("meson.build".into());
         kinds.push(ProjectKind::Meson);
+    }
+    // Standalone C sources in a directory (no higher-level build system already claimed)
+    if kinds.is_empty() {
+        if path.join("main.c").is_file() || dir_has_extension(path, "c") {
+            markers.push("*.c".into());
+            kinds.push(ProjectKind::C);
+        }
     }
 
     let mut package_scripts = None;
@@ -377,7 +415,9 @@ pub fn find_projects_under(root: &Path, max_depth: usize) -> Vec<ProjectInfo> {
             continue;
         }
         let name = entry.file_name().to_string_lossy();
-        if !marker_names.iter().any(|m| *m == name) {
+        let is_csproj = name.ends_with(".csproj") || name.ends_with(".sln");
+        let is_main_c = name == "main.c";
+        if !marker_names.iter().any(|m| *m == name) && !is_csproj && !is_main_c {
             continue;
         }
         if let Some(parent) = entry.path().parent() {
@@ -519,11 +559,374 @@ pub fn has_command(cmd: &str) -> bool {
     {
         return true;
     }
+    #[cfg(windows)]
+    {
+        for ext in ["", ".exe", ".cmd", ".bat"] {
+            let name = format!("{}{}", cmd, ext);
+            if std::process::Command::new("where")
+                .arg(&name)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
     std::process::Command::new("which")
         .arg(cmd)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// True if any immediate child file ends with the given extension (no leading dot).
+fn dir_has_extension(path: &Path, ext: &str) -> bool {
+    let Ok(rd) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if let Some(e) = p.extension().and_then(|e| e.to_str()) {
+                if e.eq_ignore_ascii_case(ext) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Inspect a single file artifact (source, JAR, script, or native binary).
+/// Returns a ProjectInfo rooted at the file's parent directory.
+pub fn inspect_file(path: &Path) -> Option<ProjectInfo> {
+    if !path.is_file() {
+        return None;
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+    let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let (kinds, markers) = match ext.as_str() {
+        "c" => (vec![ProjectKind::C], vec![name.clone()]),
+        "py" => (vec![ProjectKind::Python], vec![name.clone()]),
+        "js" | "mjs" | "cjs" => (vec![ProjectKind::Node], vec![name.clone()]),
+        "jar" => (vec![ProjectKind::Jar], vec![name.clone()]),
+        "cs" => (vec![ProjectKind::CSharp], vec![name.clone()]),
+        "csproj" => (vec![ProjectKind::CSharp], vec![name.clone()]),
+        _ => {
+            if is_probably_native_executable(path) {
+                (vec![ProjectKind::NativeExe], vec![name.clone()])
+            } else {
+                return None;
+            }
+        }
+    };
+
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut info = ProjectInfo {
+        path: parent,
+        name: stem,
+        kinds,
+        markers,
+        has_package_json: false,
+        has_cargo_toml: false,
+        has_pyproject: false,
+        has_requirements: false,
+        has_cmake: false,
+        has_tauri: false,
+        has_vite: false,
+        has_go_mod: false,
+        package_scripts: None,
+    };
+    info.markers.push(format!("file:{}", abs.display()));
+    Some(info)
+}
+
+/// Lightweight magic-byte check for ELF / Mach-O / PE without extra crates.
+pub fn is_probably_native_executable(path: &Path) -> bool {
+    let Ok(mut f) = fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    if f.read(&mut buf).ok().unwrap_or(0) < 4 {
+        return false;
+    }
+    // ELF
+    if buf == [0x7f, b'E', b'L', b'F'] {
+        return true;
+    }
+    // Mach-O (32/64, BE/LE)
+    let magic = u32::from_le_bytes(buf);
+    if matches!(
+        magic,
+        0xfeedface | 0xcefaedfe | 0xfeedfacf | 0xcffaedfe | 0xcafebabe
+    ) {
+        return true;
+    }
+    // PE / DOS MZ
+    if buf[0] == b'M' && buf[1] == b'Z' {
+        return true;
+    }
+    // Unix: executable bit + not a script with #!
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = path.metadata() {
+            if meta.permissions().mode() & 0o111 != 0 {
+                // Exclude text scripts starting with #!
+                if buf[0] == b'#' && buf[1] == b'!' {
+                    return false;
+                }
+                // Heuristic: binary-looking if high bits present
+                if buf.iter().any(|b| *b == 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Read Main-Class from a JAR's META-INF/MANIFEST.MF if present.
+pub fn jar_main_class(jar: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = fs::File::open(jar).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entry = archive.by_name("META-INF/MANIFEST.MF").ok()?;
+    let mut content = String::new();
+    entry.read_to_string(&mut content).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Main-Class:") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Prefer clang, then gcc, then cc.
+pub fn resolve_c_compiler() -> Option<String> {
+    for c in ["clang", "gcc", "cc"] {
+        if has_command(c) {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+pub fn csharp_start_commands(info: &ProjectInfo) -> Vec<String> {
+    if !has_command("dotnet") {
+        return vec![];
+    }
+    // Prefer explicit csproj from markers (single-file path)
+    if let Some(file_marker) = info.markers.iter().find(|m| m.starts_with("file:")) {
+        let p = &file_marker[5..];
+        if p.ends_with(".csproj") {
+            let (mode, _) = classify_csharp_file(Path::new(p));
+            return csharp_commands_for(Path::new(p), mode);
+        }
+    }
+    // Directory: pick first csproj
+    if let Some(csproj) = find_first_csproj(&info.path) {
+        let (mode, _) = classify_csharp_file(&csproj);
+        return csharp_commands_for(&csproj, mode);
+    }
+    // Solution-only
+    if dir_has_extension(&info.path, "sln") {
+        return vec![
+            "dotnet restore".into(),
+            "dotnet build -c Release --no-restore".into(),
+        ];
+    }
+    vec![]
+}
+
+fn find_first_csproj(root: &Path) -> Option<PathBuf> {
+    let Ok(rd) = fs::read_dir(root) else {
+        return None;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("csproj") {
+            return Some(p);
+        }
+    }
+    // one level deep
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Ok(rd2) = fs::read_dir(&p) {
+                for e2 in rd2.flatten() {
+                    let p2 = e2.path();
+                    if p2.extension().and_then(|e| e.to_str()) == Some("csproj") {
+                        return Some(p2);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn classify_csharp_file(csproj: &Path) -> (crate::model::ExecutionMode, crate::model::ProjectClass) {
+    use crate::model::{ExecutionMode, ProjectClass};
+    let content = fs::read_to_string(csproj).unwrap_or_default();
+    let lower = content.to_lowercase();
+    let is_exe = lower.contains("<outputtype>exe</outputtype>")
+        || lower.contains("<outputtype>winexe</outputtype>")
+        || lower.contains("microsoft.net.sdk.web")
+        || (!lower.contains("<outputtype>library</outputtype>")
+            && !lower.contains("<outputtype>module</outputtype>")
+            && (lower.contains("microsoft.net.sdk") && !lower.contains("microsoft.net.sdk.web")
+                || content.contains("OutputType")));
+    // SDK-style defaults to Exe for console templates; Library packs often set OutputType Library
+    if lower.contains("<outputtype>library</outputtype>")
+        || lower.contains("microsoft.net.sdk.razor")
+            && !lower.contains("<outputtype>exe</outputtype>")
+    {
+        return (ExecutionMode::Library, ProjectClass::Library);
+    }
+    if lower.contains("microsoft.net.sdk.web")
+        || lower.contains("aspnetcore")
+        || lower.contains("microsoft.aspnetcore")
+    {
+        return (ExecutionMode::PersistentServer, ProjectClass::Application);
+    }
+    if is_exe || lower.contains("<outputtype>exe</outputtype>") {
+        return (ExecutionMode::OneShotCli, ProjectClass::Cli);
+    }
+    // SDK console default is Exe when unspecified
+    if lower.contains("microsoft.net.sdk") && !lower.contains("outputtype") {
+        return (ExecutionMode::OneShotCli, ProjectClass::Cli);
+    }
+    (ExecutionMode::Library, ProjectClass::Library)
+}
+
+fn csharp_commands_for(csproj: &Path, mode: crate::model::ExecutionMode) -> Vec<String> {
+    use crate::model::ExecutionMode;
+    let proj = csproj
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let arg = if proj.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", proj)
+    };
+    match mode {
+        ExecutionMode::Library | ExecutionMode::BuildOnly => {
+            vec![
+                format!("dotnet restore{}", arg),
+                format!("dotnet build -c Release --no-restore{}", arg),
+            ]
+        }
+        ExecutionMode::PersistentServer => {
+            vec![
+                format!("dotnet restore{}", arg),
+                format!("dotnet build -c Release --no-restore{}", arg),
+                format!("dotnet run -c Release --no-build{}", arg),
+            ]
+        }
+        _ => {
+            vec![
+                format!("dotnet restore{}", arg),
+                format!("dotnet build -c Release --no-restore{}", arg),
+                format!("dotnet run -c Release --no-build{}", arg),
+            ]
+        }
+    }
+}
+
+pub fn c_start_commands(info: &ProjectInfo) -> Vec<String> {
+    let compiler = match resolve_c_compiler() {
+        Some(c) => c,
+        None => return vec![],
+    };
+    // Prefer explicit main.c or file: marker
+    let source = if let Some(m) = info.markers.iter().find(|m| m.starts_with("file:") && m.ends_with(".c")) {
+        PathBuf::from(&m[5..])
+    } else if info.path.join("main.c").is_file() {
+        info.path.join("main.c")
+    } else {
+        // first .c in directory
+        let Ok(rd) = fs::read_dir(&info.path) else {
+            return vec![];
+        };
+        match rd.flatten().map(|e| e.path()).find(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("c")
+        }) {
+            Some(p) => p,
+            None => return vec![],
+        }
+    };
+    let out_dir = cpp_build_dir(&info.path, "c");
+    let bin_name = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("a.out");
+    let out_bin = out_dir.join(bin_name);
+    vec![
+        format!("__axiom_mkdir__{}", out_dir.display()),
+        format!(
+            "{} -O2 -o {} {}",
+            compiler,
+            shell_quote_path(&out_bin),
+            shell_quote_path(&source)
+        ),
+        format!("__axiom_run_bin__{}", out_bin.display()),
+    ]
+}
+
+pub fn jar_start_commands(info: &ProjectInfo) -> Vec<String> {
+    let jar_path = info
+        .markers
+        .iter()
+        .find(|m| m.starts_with("file:") && m.ends_with(".jar"))
+        .map(|m| PathBuf::from(&m[5..]))
+        .or_else(|| {
+            info.markers
+                .iter()
+                .find(|m| m.ends_with(".jar"))
+                .map(|m| info.path.join(m))
+        });
+    let Some(jar_path) = jar_path else {
+        return vec![];
+    };
+    if jar_main_class(&jar_path).is_none() {
+        // Non-executable JAR — no start; verification path will explain
+        return vec![];
+    }
+    if !has_command("java") {
+        return vec![];
+    }
+    vec![format!("java -jar {}", shell_quote_path(&jar_path))]
+}
+
+pub fn native_exe_start_commands(info: &ProjectInfo) -> Vec<String> {
+    if let Some(m) = info.markers.iter().find(|m| m.starts_with("file:")) {
+        return vec![format!("__axiom_run_bin__{}", &m[5..])];
+    }
+    vec![]
 }
 
 /// Path segments that must never supply application entry points.
@@ -767,9 +1170,45 @@ pub fn classify_target(
         return classify_cpp(info);
     }
 
-    // Java
+    // Java / JAR
     if info.kinds.contains(&ProjectKind::Java) {
         return classify_java(info);
+    }
+    if info.kinds.contains(&ProjectKind::Jar) {
+        if info.markers.iter().any(|m| m.starts_with("file:") && m.ends_with(".jar")) {
+            let jar = info
+                .markers
+                .iter()
+                .find(|m| m.starts_with("file:") && m.ends_with(".jar"))
+                .map(|m| Path::new(&m[5..]));
+            if let Some(j) = jar {
+                if jar_main_class(j).is_some() {
+                    return (ExecutionMode::OneShotCli, ProjectClass::Application);
+                }
+            }
+        }
+        return (ExecutionMode::Library, ProjectClass::Library);
+    }
+
+    // C#
+    if info.kinds.contains(&ProjectKind::CSharp) {
+        if let Some(csproj) = find_first_csproj(&info.path) {
+            return classify_csharp_file(&csproj);
+        }
+        if let Some(m) = info.markers.iter().find(|m| m.starts_with("file:") && m.ends_with(".csproj")) {
+            return classify_csharp_file(Path::new(&m[5..]));
+        }
+        return (ExecutionMode::BuildOnly, ProjectClass::Application);
+    }
+
+    // Standalone C
+    if info.kinds.contains(&ProjectKind::C) {
+        return (ExecutionMode::OneShotCli, ProjectClass::Cli);
+    }
+
+    // Native executable
+    if info.kinds.contains(&ProjectKind::NativeExe) {
+        return (ExecutionMode::OneShotCli, ProjectClass::Application);
     }
 
     if start.is_empty() {
@@ -1104,6 +1543,31 @@ pub fn toolchain_status(info: &ProjectInfo) -> Vec<(String, bool, String)> {
                 ));
             }
         }
+        ProjectKind::C => {
+            let cc = resolve_c_compiler().is_some();
+            status.push((
+                "c-compiler".into(),
+                cc,
+                resolve_c_compiler().unwrap_or_else(|| "missing".into()),
+            ));
+        }
+        ProjectKind::CSharp => {
+            let dotnet = has_command("dotnet");
+            status.push((
+                "dotnet".into(),
+                dotnet,
+                if dotnet { "found".into() } else { "missing".into() },
+            ));
+        }
+        ProjectKind::Jar => {
+            let java = has_command("java");
+            status.push((
+                "java".into(),
+                java,
+                if java { "found".into() } else { "missing".into() },
+            ));
+        }
+        ProjectKind::NativeExe => {}
         ProjectKind::Unknown => {}
     }
     status

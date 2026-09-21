@@ -6,21 +6,29 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn axiom_bin() -> std::path::PathBuf {
-    // Prefer freshly built target
-    let candidates = [
-        "/tmp/axiom-target3/debug/axiom",
-        "/tmp/axiom-target2/debug/axiom",
-        "/tmp/axiom-target/debug/axiom",
-        "target/debug/axiom",
-        "target/release/axiom",
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_axiom") {
+        let pb = std::path::PathBuf::from(&p);
+        if pb.is_file() {
+            return pb;
+        }
+    }
+    let mut candidates = vec![
+        std::path::PathBuf::from("/tmp/axiom-v014/debug/axiom"),
+        std::path::PathBuf::from("/tmp/axiom-target3/debug/axiom"),
+        std::path::PathBuf::from("/tmp/axiom-target2/debug/axiom"),
+        std::path::PathBuf::from("/tmp/axiom-target/debug/axiom"),
+        std::path::PathBuf::from("target/debug/axiom"),
+        std::path::PathBuf::from("target/release/axiom"),
     ];
-    for c in &candidates {
-        let p = std::path::PathBuf::from(c);
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        candidates.insert(0, std::path::PathBuf::from(td).join("debug/axiom"));
+    }
+    for p in candidates {
         if p.is_file() {
             return p;
         }
     }
-    std::path::PathBuf::from("/tmp/axiom-target/debug/axiom")
+    std::path::PathBuf::from("axiom")
 }
 
 #[test]

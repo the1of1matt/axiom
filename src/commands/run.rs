@@ -63,6 +63,32 @@ pub fn run(target: Option<&str>, verbose: bool, keep_temp: bool) -> Result<()> {
         println!("  · inspecting as directory...");
     }
 
+    // Single-file artifacts (source, JAR, script, native binary)
+    if input.is_file()
+        && !archive::is_zip(&input)
+        && !archive::is_tar_gz(&input)
+    {
+        if let Some(app) = graph::build_application_from_file(&input) {
+            println!("✓ Artifact detected");
+            println!("  {}", input.display());
+            println!();
+            graph::print_graph(&app);
+            println!();
+            if app.components.is_empty() {
+                bail!("no runnable component for {}", input.display());
+            }
+            // JAR without Main-Class
+            if app.components.iter().any(|c| {
+                c.info.kinds.contains(&crate::detect::ProjectKind::Jar) && c.start.is_empty()
+            }) {
+                println!("This JAR does not declare an executable Main-Class.");
+                println!("It may be a library rather than an executable application.");
+                return Ok(());
+            }
+            return run_graph(app, verbose, keep_temp, None);
+        }
+    }
+
     let work_root = if archive::is_zip(&input) {
         println!("✓ ZIP detected");
         print!("✓ Extracting... ");
@@ -71,12 +97,23 @@ pub fn run(target: Option<&str>, verbose: bool, keep_temp: bool) -> Result<()> {
         println!("done");
         cleanup = Some(dest.clone());
         dest
+    } else if archive::is_tar_gz(&input) {
+        println!("✓ TAR.GZ detected");
+        print!("✓ Extracting... ");
+        io::stdout().flush().ok();
+        let dest = archive::extract_tar_gz(&input)?;
+        println!("done");
+        cleanup = Some(dest.clone());
+        dest
     } else if input.is_dir() {
         println!("✓ Project discovered");
         println!("  {}", input.display());
         input
     } else {
-        bail!("not a directory, ZIP, or .app: {}", input.display());
+        bail!(
+            "not a directory, archive, source file, JAR, executable, or .app: {}",
+            input.display()
+        );
     };
 
     println!();
@@ -88,6 +125,17 @@ pub fn run(target: Option<&str>, verbose: bool, keep_temp: bool) -> Result<()> {
         cleanup_if(&cleanup, keep_temp);
         bail!("no project components discovered");
     }
+
+    run_graph(app, verbose, keep_temp, cleanup)
+}
+
+fn run_graph(
+    app: crate::model::ApplicationGraph,
+    verbose: bool,
+    keep_temp: bool,
+    cleanup: Option<PathBuf>,
+) -> Result<()> {
+    let work_root = app.root.clone();
 
     // Trust
     let plan_fp = app.plan_fingerprint();
